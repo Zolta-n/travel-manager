@@ -17,6 +17,8 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from ai_reader import AIConfig, AIError, JobBoard, build_content, build_context, build_request, call_claude, normalize_result
+import base64
+import travel_log
 from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate
 from store import Conflict, StateError, Store
 
@@ -109,6 +111,7 @@ class Application:
         self.readers = ReaderGate()
         self.ai = config.ai or AIConfig(api_key="")
         self.jobs = JobBoard()
+        self.log_cache = {}
 
     def _load_password(self, password):
         """Sessions survive restarts; only a changed password signs every device out."""
@@ -359,6 +362,10 @@ class Application:
             ("POST", "/api/read"): self.read_document,
             ("POST", "/api/analyze"): self.start_analysis,
             ("GET", "/api/backup"): self.backup,
+            ("POST", "/api/travel-log"): self.travel_log_report,
+            ("GET", "/api/countries"): self.countries,
+            ("GET", "/manifest.json"): self.static, ("GET", "/apple-touch-icon.png"): self.static,
+            ("GET", "/icon-192.png"): self.static, ("GET", "/icon-512.png"): self.static,
         }
 
     def dispatch(self, env):
@@ -389,6 +396,18 @@ class Application:
         except FileNotFoundError:
             raise APIError(503, "The frontend is not present. Deploy the complete project.") from None
         return self.ok(body, [("Content-Type", "text/html; charset=utf-8")])
+
+    STATIC = {"/manifest.json": "application/manifest+json", "/apple-touch-icon.png": "image/png",
+              "/icon-192.png": "image/png", "/icon-512.png": "image/png"}
+
+    def static(self, env):
+        """Home-screen icon and web app manifest: public, no private data."""
+        path = env.get("PATH_INFO", "")
+        try:
+            body = (self.config.web_dir / path.lstrip("/")).read_bytes()
+        except FileNotFoundError:
+            raise APIError(404, "Not found.", "not_found") from None
+        return self.ok(body, [("Content-Type", self.STATIC[path])])
 
     def get_session(self, env):
         row, _ = self.session(env)
@@ -501,6 +520,57 @@ class Application:
         if job is None:
             raise APIError(404, "This reading job has expired. Read the document again.", "not_found")
         return self.ok(job)
+
+    # ------------------------------------------------------------ travel log and countries
+
+    def _home_country(self, state):
+        return travel_log.zone_country(state.get("settings", {}).get("homeZone") or "Asia/Shanghai")
+
+    def _log_documents(self, state):
+        """Uploaded Excel travel logs as (document, parsed log), newest first; unreadable files are skipped."""
+        found = []
+        for doc in reversed(state.get("documents", [])):
+            if not str(doc.get("name", "")).lower().endswith((".xlsx", ".xlsm")):
+                continue
+            key = doc.get("hash") or doc.get("documentId")
+            if key not in self.log_cache:
+                try:
+                    binary, _, _ = self.store.original(doc["documentId"])
+                    self.log_cache[key] = travel_log.read_log(binary)
+                except (KeyError, StateError, OSError, travel_log.LogError):
+                    self.log_cache[key] = None
+            if self.log_cache[key]:
+                found.append((doc, self.log_cache[key]))
+        return found
+
+    def travel_log_report(self, env):
+        self.require_auth(env, csrf=True)
+        _, path, _, name = self._document_from(env)
+        state = self.store.metadata()
+        try:
+            data, summary = travel_log.fill_log(Path(path).read_bytes(), state, self._home_country(state))
+        except travel_log.LogError as exc:
+            raise APIError(422, str(exc), "invalid_travel_log") from None
+        env["travel.note"] = "travel log %d: %d rows filled" % (summary["year"], summary["rowsChanged"])
+        return self.ok({"name": travel_log.report_name(summary["year"]), "summary": summary,
+                        "data": base64.b64encode(data).decode("ascii")})
+
+    def countries(self, env):
+        self.require_auth(env)
+        try:
+            year = int(self.query(env, "year") or time.strftime("%Y"))
+        except ValueError:
+            raise APIError(400, "Supply a year.") from None
+        if not 1990 <= year <= 2200:
+            raise APIError(400, "Supply a year between 1990 and 2200.")
+        state = self.store.metadata()
+        logs = [(doc, log) for doc, log in self._log_documents(state) if log["year"] == year]
+        log = logs[0][1] if logs else {"verified": {}, "countries": {}}
+        days = travel_log.day_countries(state, year, log["verified"], self._home_country(state), log["countries"])
+        return self.ok({"year": year, "home": self._home_country(state), "logDocument": logs[0][0]["name"] if logs else "",
+                        "logYears": sorted({l["year"] for _, l in self._log_documents(state)}),
+                        "days": [{"date": d.isoformat(), "country": i["country"], "source": i["source"]} for d, i in sorted(days.items())],
+                        "totals": travel_log.totals(days)})
 
     def backup(self, env):
         self.require_auth(env)

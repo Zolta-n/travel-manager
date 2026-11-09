@@ -193,7 +193,7 @@ def build_content(binary, mime, name, text=None, image=None):
             raise AIError("The document contains no readable text.", "no_text", 422)
         return [{"type": "text", "text": "Document file: " + (name or "document") +
                  "\n----- DOCUMENT TEXT START -----\n" + text[:MAX_TEXT_CHARS] + "\n----- DOCUMENT TEXT END -----"}]
-    raise AIError("This format cannot be read by AI. Use PDF, a photo (JPEG/PNG/WebP/GIF), an .eml email or text.",
+    raise AIError("This format cannot be read by AI. Use PDF, Word (.docx), a photo (JPEG/PNG/WebP/GIF), an .eml email or text.",
                   "unsupported_type", 422)
 
 
