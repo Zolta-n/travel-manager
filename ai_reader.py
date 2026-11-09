@@ -201,8 +201,10 @@ def build_context(state, today=None):
     trips = [{"tripId": t.get("tripId", ""), "name": t.get("name", ""), "type": t.get("type", ""),
               "destination": t.get("destination", ""), "startDate": t.get("startDate", ""),
               "endDate": t.get("endDate", "")} for t in (state or {}).get("trips", [])][:200]
-    home = str((state or {}).get("settings", {}).get("homeZone") or "Asia/Shanghai")
-    return {"today": (today or date.today()).isoformat(), "homeZone": home, "trips": trips}
+    settings = (state or {}).get("settings", {})
+    home = str(settings.get("homeZone") or "Asia/Shanghai")
+    memo = settings.get("readingMemo") if isinstance(settings.get("readingMemo"), str) else ""
+    return {"today": (today or date.today()).isoformat(), "homeZone": home, "trips": trips, "memo": memo.strip()[-8000:]}
 
 
 def build_request(content, context, name, model):
@@ -211,6 +213,9 @@ def build_request(content, context, name, model):
                    "Today's date: " + context["today"] + "\n"
                    "Traveller's home time zone: " + context["homeZone"] + "\n"
                    "Existing trips (JSON): " + json.dumps(context["trips"], ensure_ascii=False))
+    if context.get("memo"):
+        instruction += ("\n\nTraveller's reading memo (their preferences and corrections to earlier readings). Apply it where it fits "
+                        "this document, but never let it override what the document clearly prints:\n" + context["memo"])
     return {
         "model": model,
         "max_tokens": 32000,

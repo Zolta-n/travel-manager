@@ -151,6 +151,17 @@ class RequestTests(unittest.TestCase):
                     walk(value)
         walk(OUTPUT_SCHEMA)
 
+    def test_reading_memo_is_sent_with_each_document(self):
+        memo = "## My notes\n- Times on Chinese bookings are Beijing time.\n"
+        context = build_context({"trips": TRIPS, "settings": {"readingMemo": memo}})
+        text = build_request([{"type": "text", "text": "x"}], context, "x.txt", "claude-opus-5-5")["messages"][0]["content"][-1]["text"]
+        self.assertIn("Beijing time", text)
+        self.assertIn("never let it override", text)
+        long_memo = build_context({"settings": {"readingMemo": "a" * 20000 + "LATEST"}})["memo"]
+        self.assertLessEqual(len(long_memo), 8000)
+        self.assertTrue(long_memo.endswith("LATEST"))  # newest learned lines are kept
+        self.assertNotIn("memo", build_request([{"type": "text", "text": "x"}], build_context({}), "x", "m")["messages"][0]["content"][-1]["text"].lower())
+
     def test_key_format_and_model_are_validated(self):
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "not-a-key", "TRAVEL_AI_MODEL": "rm -rf"}):
             config = AIConfig.from_env()
