@@ -38,3 +38,10 @@ Zoltan. Non-developer for this project: prefers DSM GUI steps (Task Scheduler, F
 - **Handoff items 1–5 fixed:** Dockerfile chmod step + image readability check; `synoacltool -del` + explicit chmod on every private file the installer creates (LOGIN.txt now chmod 600); `E_*` reason codes; START_HERE uses the real folder name; `--rotate-password`. Also `--set-ai-key` / `--remove-ai-key`, IPv6-optional port check.
 - **Data:** state format unchanged (version 2); new settings keys `aiReading`, `homeZone` are plain scalars; `documents[].auto` holds the reading result. No migration needed.
 - `.env` may now have a 6th line `ANTHROPIC_API_KEY='sk-ant-…'`. PACKAGE.sha256 lists 16 files (added `ai_reader.py`).
+
+
+## v4.1 (2026-11-09) — sync, sessions, GitHub deployment
+- Reported problems: edits from the iPhone not reaching other devices, repeated sign-ins, a PDF stuck on "Reading…".
+- Causes found: sessions deleted on every restart and only 12 h long; one shared sign-in limit for all devices (all traffic arrives from the tunnel); a save conflict stopped a device from saving; unsaved edits lived only in the tab; "Reading…" was saved to the server and AI results were lost when the tab closed.
+- Fixes: see `VERIFICATION.md` (v4.1) and `CLAUDE.md`. Code now lives in GitHub `Zolta-n/travel-manager`; deployment via GitHub Actions → ghcr.io → Watchtower (`UPDATE_WORKFLOW.md`).
+- Cloudflare zone `businessintels.com`: ECH turned off via API (the owner's office network broke ECH connections to all subdomains). HTTP/3 was turned off during diagnosis.

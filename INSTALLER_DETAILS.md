@@ -46,6 +46,12 @@ Health polling has a120-second budget with bounded Docker inspections (small sch
 
 The packaged seed includes the initial conversation itinerary only. Import the user's latest complete v2/v3 JSON backup through the authenticated app to bring over later local rental documents/manual entries/originals. No v1 database is automatically adopted and no later offline upload is invented.
 
+## v4.1 additions
+
+- **Image from GitHub:** the installer no longer builds on the NAS. It pulls `ghcr.io/zolta-n/travel-manager:latest` (built and tested by GitHub Actions) and refuses an image whose `org.opencontainers.image.source` label is not `https://github.com/Zolta-n/travel-manager` (`E_IMAGE_SOURCE`). A failed download stops with `E_IMAGE_PULL`; config and data are kept. `--build` and `--pull` both mean "download the latest image now". Watchtower updates the container afterwards; it keeps all compose settings (loopback port, read-only, cap-drop, user 10001).
+- **Switch-over:** an existing container running the locally built `travel-manager-easy-<id>:local` image is recognised as this installation's own and replaced.
+- **File Station permissions:** in install mode, as root, package files from the fixed 16-file allowlist that are group/world writable and owned by root or the uploader get their ACL removed and mode 0600. `--check` never changes anything; `.env`, `.installer/`, `private/LOGIN.txt` and `data/` are still never repaired automatically.
+
 ## v4 additions
 
 ### Options

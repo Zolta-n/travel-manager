@@ -154,12 +154,10 @@ if args[0] == "inspect":
     elif ".State.Running" in fmt: out("true" if item.get("running", True) else "false")
     else: raise RuntimeError(fmt)
     die(0)
-if args[0] == "build":
+if args[0] == "pull":
     if state.get("build_fail"):
         leak_then_fail()
-    image = args[args.index("--tag") + 1]
-    identity = args[args.index("--build-arg") + 1].split("=", 1)[1]
-    state["images"][image] = identity
+    state["images"][args[-1]] = "https://github.com/Zolta-n/travel-manager"
     state["builds"] += 1
     die(0)
 if args[0] == "run" and "--project" not in args:
@@ -218,7 +216,7 @@ if args[0] == "compose":
         die(0)
     if "up" in args:
         if state.get("up_fail"): leak_then_fail()
-        state["containers"]["cid-owned"] = {"name": project + "-travel-manager-1", "id": identity, "project": project, "dir": directory, "image": "travel-manager-easy-" + identity + ":local"}
+        state["containers"]["cid-owned"] = {"name": project + "-travel-manager-1", "id": identity, "project": project, "dir": directory, "image": "ghcr.io/zolta-n/travel-manager:latest"}
         database = project_dir / "data/travel.sqlite3"
         if not database.exists():
             database.write_bytes(b"initial managed database")
@@ -246,7 +244,11 @@ class InstallerHarness(unittest.TestCase):
             source = ROOT / name
             target = self.project / name
             target.parent.mkdir(mode=0o700, exist_ok=True)
-            shutil.copyfile(source, target)
+            if name == "private/seed.json" and not source.exists():
+                # The real itinerary never leaves the NAS (not in git/CI); use a stand-in.
+                target.write_text(json.dumps({"version": 2, "selected": "", "trips": [], "activities": [], "documents": [], "expenses": [], "settings": {}}))
+            else:
+                shutil.copyfile(source, target)
             target.chmod(0o600)
         self.runner = self.work / "mock_tool.py"
         self.runner.write_text(MOCK_TOOL)
@@ -466,7 +468,7 @@ class InstallerTests(InstallerHarness):
         image = next(iter(self.state["images"]))
         self.state["images"][image] = "unrelated"; self.save()
         self.run_installer(ok=False)
-        self.state["images"][image] = self.state["containers"]["cid-owned"]["id"]
+        self.state["images"][image] = "https://github.com/Zolta-n/travel-manager"
         self.state["containers"]["cid-owned"]["ports"] = "8787/tcp 0.0.0.0 8787"; self.save()
         self.run_installer(ok=False)
         self.state["containers"]["cid-owned"]["ports"] = ""
@@ -487,9 +489,8 @@ class InstallerTests(InstallerHarness):
         self.install()
         self.run_installer("--build")
         self.assertEqual(self.state["builds"], 2)
-        builds = [c for c in self.state["calls"] if c[0] == "build"]
-        self.assertEqual(builds[0][builds[0].index("--tag") + 1], builds[1][builds[1].index("--tag") + 1])
-        self.assertTrue(all("travel-manager-nas:local" not in c for c in builds))
+        pulls = [c for c in self.state["calls"] if c[0] == "pull"]
+        self.assertEqual([c[-1] for c in pulls], ["ghcr.io/zolta-n/travel-manager:latest"] * 2)
 
     def test_helpers_are_offline_narrow_and_normal_compose_not_root(self):
         self.install()
@@ -701,3 +702,35 @@ class UpgradeOptionTests(InstallerHarness):
         self.run_installer("--set-ai-key", ok=False)
         (self.project / ".env").write_bytes(before + b"ANTHROPIC_API_KEY='$(id)'\n")
         self.run_installer(ok=False)
+
+
+class RegistryAndPermissionTests(InstallerHarness):
+    """v4.1: image from ghcr.io, switch-over from the locally built v4 image, File Station permission repair."""
+
+    def test_switch_from_locally_built_v4_container(self):
+        self.install()
+        identity = (self.project / ".installer/id").read_text().strip()
+        self.state["containers"]["cid-owned"]["image"] = "travel-manager-easy-" + identity + ":local"; self.save()
+        self.run_installer("--pull")
+        self.assertEqual(self.state["containers"]["cid-owned"]["image"], "ghcr.io/zolta-n/travel-manager:latest")
+
+    def test_wrong_image_source_is_refused(self):
+        self.install()
+        self.state["images"]["ghcr.io/zolta-n/travel-manager:latest"] = "https://github.com/someone/else"; self.save()
+        result = self.run_installer(ok=False)
+        self.assertIn("expected repository", result.stderr)
+
+    def test_writable_package_files_are_repaired_not_refused(self):
+        target = str(self.project / "app.py")
+        self.state["modes"][target] = "777"; self.save()
+        result = self.install()
+        self.assertIn("Repaired permissions of app.py", result.stdout)
+        self.assertEqual(self.state["modes"][target], "600")
+        self.state["modes"][str(self.project / ".env")] = "644"; self.save()
+        self.run_installer(ok=False)  # private config is still never repaired automatically
+
+    def test_check_mode_never_repairs(self):
+        target = str(self.project / "app.py")
+        self.state["modes"][target] = "777"; self.save()
+        self.run_installer("--check", "--host", "travel.example.net", ok=False)
+        self.assertEqual(self.state["modes"][target], "777")

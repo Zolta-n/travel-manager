@@ -41,7 +41,7 @@ def segment(**overrides):
 def result(*segments, trip="t-us", costs=()):
     return {"documentType": "e_ticket", "summary": "Flight ticket", "documentDate": "2026-10-01",
             "segments": list(segments), "costs": list(costs),
-            "trip": {"matchedTripId": trip, "reason": "dates", "newTripName": "", "newTripDestination": ""},
+            "trip": {"matchedTripId": trip, "reason": "dates", "newTripName": "", "newTripDestination": "", "newTripType": "Business"},
             "warnings": []}
 
 

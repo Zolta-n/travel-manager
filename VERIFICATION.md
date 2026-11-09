@@ -1,5 +1,11 @@
 # Travel Manager NAS — verification and limits
 
+## v4.1 verification (2026-11-09)
+
+- **Tests:** 89 automated tests (new: `tests/test_sync.py` — sessions across restarts and password changes, 30-day sliding sessions, per-device sign-in limits with forged-header protection, lightweight state, kept originals, missing-original refusal, current backup, stored AI results; installer tests for the ghcr.io image, switch-over from the v4 container, wrong image source, permission repair and `--check` never repairing).
+- **Two-device browser test (Playwright, real server, fake Claude):** 5 wrong sign-ins lock out only that device; simultaneous edits on PC and phone are merged (both kept); an edit made while the phone was offline, with the tab then closed, reached the NAS after reopening; an AI reading started on the phone whose tab closed mid-read was applied by the PC, creating the "Munich December trip" (Business) with both legs, with no duplicates when the phone reopened; a save with one stored PDF was 4.5 KB; originals load on demand.
+- **Not verified here:** GitHub Actions run, ghcr.io pull and Watchtower update on the NAS, real Anthropic calls, iPhone Safari's IndexedDB under storage pressure.
+
 ## v4 verification (2026-11-08)
 
 - **Unit and integration tests:** `python -m unittest discover -s tests` → 77 tests, all passed, 3 skipped (Tesseract OCR not installed in the development sandbox). New: `tests/test_ai.py` (16 tests: overnight cross-zone flights and UTC instants, missing "+1 day", DST gap and repeated hour, invalid zones with printed-offset fallback, offset mismatch, inferred years, trip-match sanity, de-duplication, costs, request schema, key validation, refusal handling, end-to-end background job through the real WSGI app, EXIF-rotated phone photo preparation) and `UpgradeOptionTests` (password rotation, AI key set/remove/invalid/tampered, `E_APP_UNREADABLE` and `E_SEED_MODE` reason codes).

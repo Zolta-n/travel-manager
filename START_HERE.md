@@ -12,28 +12,35 @@ If you install somewhere else, replace that path everywhere.
 
 ---
 
-## A. Upgrading an existing installation (v2 → v4)
+## A. How updates work (from v4.1)
 
-Your password, host name and data are kept. The data format is unchanged, so no migration runs.
+Code lives in the private GitHub repository `Zolta-n/travel-manager`.
 
-1. **Back up first.** In the app, open *Excel & backup* → **Current-state backup**. Keep the file private.
-2. **Copy the new files in.** In File Station, upload the ZIP to `/volume1/travelapp/` and choose **Extract → Extract here**, allowing it to overwrite. The ZIP contains the folder `Travel_Manager_NAS_Easy_Setup_v2/` with program files only — it never contains `data/`, `.env`, `.installer/` or `private/LOGIN.txt`, so those stay as they are.
-3. **(Optional) Add your Anthropic API key** for AI document reading — see section C. You can do this later.
-4. **Rebuild.** Control Panel → Task Scheduler → select your Travel Manager task → **Edit** → *Task Settings*. Set the command to:
+```
+change on a branch → you merge the pull request → GitHub runs all tests
+  → tests pass → new image published to ghcr.io → Watchtower on the NAS installs it (≤ 5 min)
+```
+
+You only merge. If a test fails, nothing is published and the NAS keeps the current version. Your data, password and API key are never in GitHub or in the image; they stay in `data/` and `.env` on the NAS. Sign-ins survive these automatic restarts.
+
+The install task is only needed again when the **installer itself** changes (the release notes will say so). The package for that is attached to each successful run under GitHub → **Actions** → the run → **Artifacts**.
+
+### One-time switch from v4 to automatic updates
+
+1. **Merge** the v4.1 pull request on GitHub and wait for the green tick under **Actions** (about 5 minutes).
+2. **Make the image downloadable for the NAS:** open `https://github.com/users/Zolta-n/packages/container/travel-manager/settings` → **Danger Zone → Change visibility → Public**. The image contains program code only — no data, passwords or keys.
+3. **Copy in the new installer:** upload the ZIP to `/volume1/travelapp/`, right-click → **Extract → Extract to…** → `travelapp` → **Overwrite existing files**. The installer now repairs File Station's permission problem itself.
+4. **Run the task once** with:
 
    ```sh
-   /bin/sh /volume1/travelapp/Travel_Manager_NAS_Easy_Setup_v2/install.sh --build
+   /bin/sh /volume1/travelapp/Travel_Manager_NAS_Easy_Setup_v2/install.sh --pull
    ```
 
-   (Add ` --set-ai-key` at the end if you did step 3.) Click **OK**, then select the task and click **Run**.
-5. **Check the result.** Open `private/STATUS.txt` in File Station. It should say `Completed local installation`. Then sign in at `https://travel.businessintels.com` as before.
-6. **Set the task back** to the plain `--build`-free command for future reruns:
+   It downloads the tested image from GitHub and switches the container to it. The result should end with `SUCCESS`.
+5. **Set the task command back** to the plain version without `--pull`.
+6. **Sign in once more on each device** (this one switch ends the old sessions; after that, sign-ins last 30 days of use and survive updates).
 
-   ```sh
-   /bin/sh /volume1/travelapp/Travel_Manager_NAS_Easy_Setup_v2/install.sh
-   ```
-
-If the task fails, `private/STATUS.txt` and the task's email/output show a reason code such as `E_SEED_MODE`. Look it up in [INSTALLER_DETAILS.md](INSTALLER_DETAILS.md#reason-codes).
+Watchtower (already running on your NAS for the reporting app) picks up Travel Manager automatically — no change needed there.
 
 ---
 
@@ -71,7 +78,7 @@ To add the key:
 
 1. Create an API key at console.anthropic.com (Settings → API keys). It starts with `sk-ant-`.
 2. On your computer, create a plain text file named exactly `ANTHROPIC_API_KEY.txt` that contains **only the key**. Upload it with File Station into the app's `private/` folder.
-3. Run the task once with `--set-ai-key` at the end of the command (it can be combined with `--build`). The installer moves the key into the root-only `.env`, **deletes the text file**, and restarts the app. The key is never printed.
+3. Run the task once with `--set-ai-key` at the end of the command. The installer moves the key into the root-only `.env`, **deletes the text file**, and restarts the app. The key is never printed.
 4. Set the task command back to normal.
 
 To check that the NAS can reach Claude: Container Manager → **Container** → the Travel Manager container → **Terminal** → **Create** → run

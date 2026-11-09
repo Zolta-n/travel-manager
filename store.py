@@ -58,7 +58,10 @@ def _validate_auto(value, depth=0):
         raise StateError("Invalid reading metadata field.")
 
 
-def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES):
+def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES, known=None):
+    """Validate a state. `known` maps sha256 -> size of originals already on the NAS; a document
+    sent without `data` but with `stored: true` and a known `hash` keeps that original (no re-upload)."""
+    known = known or {}
     if not isinstance(state, dict) or type(state.get("version")) is not int or state["version"] != 2:
         raise StateError("Expected a version 2 travel state.")
     if set(state) != {"version", "selected", "settings", *COLLECTIONS}:
@@ -88,6 +91,7 @@ def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES)
                 raise StateError("Missing, duplicate or oversized " + id_key + ".")
             ids.add(identifier)
             document = dict(row)
+            keep = document.pop("stored", False) is True
             for key, value in document.items():
                 if collection == "documents" and key == "auto":
                     if not isinstance(value, dict):
@@ -123,6 +127,14 @@ def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES)
                     digest = hashlib.sha256(binary).hexdigest()
                     document.update(size=len(binary), mime=mime, hash=digest)
                     originals.append((identifier, digest, mime, binary))
+                elif keep and isinstance(document.get("hash"), str) and document["hash"] in known:
+                    digest = document["hash"]
+                    mime = document.get("mime") if isinstance(document.get("mime"), str) and re.fullmatch(r"[a-zA-Z0-9.+/-]{1,100}", document.get("mime", "")) else "application/octet-stream"
+                    total += known[digest]
+                    if total > max_current:
+                        raise StateError("Current originals exceed the 40 MiB limit.")
+                    document.update(size=known[digest], mime=mime.lower())
+                    originals.append((identifier, digest, mime.lower(), None))
                 else:
                     if data not in (None, ""):
                         raise StateError("Invalid document data.")
@@ -176,6 +188,11 @@ class Store:
                     token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS login_attempts (client TEXT NOT NULL, attempted_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_results (
+                    document_id TEXT NOT NULL, sha256 TEXT NOT NULL, created REAL NOT NULL, result_json TEXT NOT NULL,
+                    PRIMARY KEY(document_id, sha256)
+                );
                 CREATE INDEX IF NOT EXISTS login_attempts_time ON login_attempts(attempted_at);
             """)
             db.execute("BEGIN IMMEDIATE")
@@ -233,19 +250,29 @@ class Store:
         # Files become durable before any database reference can commit. An interrupted
         # write can leave an unreferenced file, never a committed missing original.
         for _, digest, _, binary in originals:
+            if binary is None:
+                # Kept original: it must still be on disk with its recorded size.
+                row = db.execute("SELECT size FROM originals WHERE sha256=?", (digest,)).fetchone()
+                path = self.original_path(digest)
+                if row is None or not path.is_file() or path.stat().st_size != row["size"]:
+                    raise StateError("A stored original is missing on the NAS. Reattach it.")
+                continue
             self._write_original(digest, binary)
             db.execute("INSERT OR IGNORE INTO originals VALUES (?, ?)", (digest, len(binary)))
         db.execute("INSERT INTO snapshots VALUES (?, ?, ?)", (revision, time.time(), metadata))
         db.executemany("INSERT INTO snapshot_originals VALUES (?, ?, ?, ?)",
                        [(revision, identifier, digest, mime) for identifier, digest, mime, _ in originals])
 
-    def _reconstruct(self, db, row):
+    def _reconstruct(self, db, row, originals=True):
         state = json.loads(row["state_json"])
         refs = {r["document_id"]: r for r in db.execute("SELECT * FROM snapshot_originals WHERE revision=?", (row["revision"],))}
         for document in state["documents"]:
             ref = refs.get(document["documentId"])
             document["data"] = ""
-            if ref:
+            if ref and not originals:
+                del document["data"]
+                document.update(stored=True, hash=ref["sha256"], mime=ref["mime"])
+            elif ref:
                 binary = self.original_path(ref["sha256"]).read_bytes()
                 if hashlib.sha256(binary).hexdigest() != ref["sha256"]:
                     raise OSError("Stored original failed its integrity check.")
@@ -256,11 +283,49 @@ class Store:
         with self.connect() as db:
             return db.execute("SELECT MAX(revision) FROM snapshots").fetchone()[0]
 
-    def get(self):
+    def get(self, originals=True):
+        """Latest state. With originals=False documents carry `stored`/`hash` instead of file contents."""
         with self.connect() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM snapshots ORDER BY revision DESC LIMIT 1").fetchone()
-            return {"state": self._reconstruct(db, row), "revision": row["revision"]}
+            return {"state": self._reconstruct(db, row, originals), "revision": row["revision"]}
+
+    def known_originals(self, db):
+        return {r["sha256"]: r["size"] for r in db.execute("SELECT sha256, size FROM originals")}
+
+    def original(self, identifier):
+        path, mime, name = self.document(identifier)
+        return path.read_bytes(), mime, name
+
+    # -------- small key/value settings (password fingerprint etc.)
+    def meta_get(self, key):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def meta_set(self, values):
+        with self.connect() as db:
+            db.executemany("INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", list(values.items()))
+
+    # -------- finished AI readings, kept so any device can apply them
+    def save_ai_result(self, document_id, digest, result, created=None):
+        created = created or time.time()
+        with self.connect() as db:
+            db.execute("DELETE FROM ai_results WHERE created<?", (time.time() - 60 * 86400,))
+            db.execute("INSERT INTO ai_results VALUES (?, ?, ?, ?) ON CONFLICT(document_id, sha256) DO UPDATE SET created=excluded.created, result_json=excluded.result_json",
+                       (document_id, digest, created, json.dumps(result, ensure_ascii=True, allow_nan=False)))
+
+    def ai_results(self):
+        with self.connect() as db:
+            return [{"documentId": r["document_id"], "sha256": r["sha256"], "created": r["created"]}
+                    for r in db.execute("SELECT document_id, sha256, created FROM ai_results ORDER BY created DESC LIMIT 500")]
+
+    def ai_result(self, document_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM ai_results WHERE document_id=? ORDER BY created DESC LIMIT 1", (document_id,)).fetchone()
+            if row is None:
+                raise KeyError(document_id)
+            return {"documentId": row["document_id"], "sha256": row["sha256"], "created": row["created"], "result": json.loads(row["result_json"])}
 
     def metadata(self):
         """Latest state without attachment contents (cheap; used for AI trip context)."""
@@ -271,9 +336,9 @@ class Store:
     def put(self, state, revision):
         if type(revision) is not int or revision < 0:
             raise StateError("revision must be a non-negative integer.")
-        metadata, originals = prepare_state(state, self.max_file, self.max_current)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            metadata, originals = prepare_state(state, self.max_file, self.max_current, self.known_originals(db))
             current = db.execute("SELECT MAX(revision) FROM snapshots").fetchone()[0]
             if current != revision:
                 raise Conflict(current)
@@ -294,6 +359,14 @@ class Store:
             if hashlib.sha256(path.read_bytes()).hexdigest() != ref["sha256"]:
                 raise OSError("Stored original failed its integrity check.")
             return path, ref["mime"], document.get("name", "")
+
+    def current_backup_chunks(self):
+        """Current state only, with originals - restorable through the app."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            latest = db.execute("SELECT * FROM snapshots ORDER BY revision DESC LIMIT 1").fetchone()
+            state = self._reconstruct(db, latest)
+        yield json.dumps(state, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
 
     def backup_chunks(self):
         # One read transaction fixes the revision boundary; originals are immutable.
