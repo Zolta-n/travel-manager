@@ -5,7 +5,7 @@ Private travel itinerary app for one owner (Zoltan), running on a Synology DS225
 ## Hard rules
 - **Merging to `main` deploys to the live NAS** (GitHub Actions → ghcr.io → Watchtower). Work on a branch; open a pull request; never push to `main` directly.
 - **Never commit** `private/seed.json`, `.env`, `data/`, keys or itinerary content. `.gitignore` covers them; check `git status` before committing.
-- **State format is version 2.** Any change to stored data needs a migration and must keep existing NAS data loadable. `documents[].auto` is free-form reading metadata.
+- **State format is version 2.** Any change to stored data needs a migration and must keep existing NAS data loadable. `documents[].auto` is free-form reading metadata. Trips: `type` is `Business`, `Private` or `Mixed` ("Business + private"); for `Mixed`, `privateDays` is a `|`-separated list of private dates (all other days are business). New optional columns must stay optional in Excel import.
 - Keep the security posture: non-root (UID 10001), read-only root fs, `cap_drop: ALL`, port bound to `127.0.0.1` only, secure cookies, CSRF on writes, no secrets in logs.
 - `install.sh` must stay POSIX `sh` (DSM BusyBox/ash). Its 16-file allowlist must match `tools/build_nas_package.py`; run that script after changing any package file so `PACKAGE.sha256` is current (CI checks it).
 - The owner prefers DSM GUI steps (File Station, Task Scheduler, Container Manager) with exact copy-paste commands; no SSH.
