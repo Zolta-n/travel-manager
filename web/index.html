@@ -525,9 +525,9 @@ function renderReview() {
   const docs = state.documents.filter(d => d.auto && REVIEW_STATES.includes(d.auto.state));
   $('#reviewCount').textContent = docs.length + ' need review';
   list.innerHTML = docs.length ? docs.map(d => {
-    const items = Array.isArray(d.auto.items) ? d.auto.items : [], canCreateTrip = !d.tripId && (d.auto.segments || []).some(s => validDate(s.activity?.startDate));
+    const items = Array.isArray(d.auto.items) ? d.auto.items : [], misfit = tripMisfit(d), canCreateTrip = (!d.tripId || misfit) && (d.auto.segments || []).some(s => validDate(s.activity?.startDate));
     const suggestion = canCreateTrip && !state.trips.some(t => (d.auto.segments || []).some(s => s.activity?.startDate >= t.startDate && s.activity?.startDate <= t.endDate)) ? suggestedTrip(d, d.auto) : null;
-    return `<article class="auto-review"><div><h3>${esc(d.name)}</h3>${suggestion ? `<div class="note-box newTrip"><b>New trip suggested:</b> ${esc(suggestion.name)} <span class="pill ${typeClass(suggestion.type)}">${esc(typeLabel(suggestion.type))}</span><br><span class="small">${esc(niceDate(suggestion.startDate))} — ${esc(niceDate(suggestion.endDate))}${suggestion.destination ? ' · ' + esc(suggestion.destination) : ''}</span><div class="actions" style="margin-block-start:8px"><button class="small primary" data-auto-act="createSuggested" data-id="${esc(d.documentId)}">Create this trip</button><button class="small" data-auto-act="newTrip" data-id="${esc(d.documentId)}">Edit name / type first</button></div></div>` : ''}<p>${esc(d.auto.reason || '')}</p><span class="small muted">${esc(d.auto.method || d.auto.state)}${Number.isFinite(d.auto.confidence) && d.auto.confidence < 100 ? ' · OCR score ' + Math.round(d.auto.confidence) : ''}</span>${items.map((a, i) => `<div class="review-item"><b>${esc(a.title || a.category)}</b> <span class="small">${esc(niceDate(a.startDate))} ${esc(a.startTime || '')} ${esc(a.startZone || '')}${a.endDate ? ' → ' + esc(niceDate(a.endDate)) + ' ' + esc(a.endTime || '') + ' ' + esc(a.endZone || '') : ''}</span>${(a.problems || []).length ? `<ul class="small">${a.problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : ''}<div class="actions"><button class="small primary" data-auto-act="review" data-id="${esc(d.documentId)}" data-index="${i}">Review &amp; add</button>${d.tripId || a.tripId ? `<button class="small" data-auto-act="accept" data-id="${esc(d.documentId)}" data-index="${i}">Add as read</button>` : ''}<button class="small quiet" data-auto-act="dismiss" data-id="${esc(d.documentId)}" data-index="${i}">Dismiss</button></div></div>`).join('')}</div><div class="actions">${canCreateTrip && !suggestion ? `<button class="small" data-auto-act="newTrip" data-id="${esc(d.documentId)}">Create trip from this</button>` : ''}<button class="small" data-auto-act="text" data-id="${esc(d.documentId)}" ${!d.auto.sourceText ? 'disabled' : ''}>Extracted text</button><button class="small" data-auto-act="read" data-id="${esc(d.documentId)}">Retry reading</button></div></article>`;
+    return `<article class="auto-review"><div><h3>${esc(d.name)}</h3>${misfit ? `<div class="note-box newTrip">Attached to “${esc(byTrip(d.tripId).name)}”, but none of its dates are near that trip.${suggestion ? '' : `<div class="actions" style="margin-block-start:8px"><button class="small primary" data-auto-act="rematch" data-id="${esc(d.documentId)}">Find the right trip</button></div>`}</div>` : ''}${suggestion ? `<div class="note-box newTrip"><b>New trip suggested:</b> ${esc(suggestion.name)} <span class="pill ${typeClass(suggestion.type)}">${esc(typeLabel(suggestion.type))}</span><br><span class="small">${esc(niceDate(suggestion.startDate))} — ${esc(niceDate(suggestion.endDate))}${suggestion.destination ? ' · ' + esc(suggestion.destination) : ''}</span><div class="actions" style="margin-block-start:8px"><button class="small primary" data-auto-act="createSuggested" data-id="${esc(d.documentId)}">Create this trip</button><button class="small" data-auto-act="newTrip" data-id="${esc(d.documentId)}">Edit name / type first</button></div></div>` : ''}<p>${esc(d.auto.reason || '')}</p><span class="small muted">${esc(d.auto.method || d.auto.state)}${Number.isFinite(d.auto.confidence) && d.auto.confidence < 100 ? ' · OCR score ' + Math.round(d.auto.confidence) : ''}</span>${items.map((a, i) => `<div class="review-item"><b>${esc(a.title || a.category)}</b> <span class="small">${esc(niceDate(a.startDate))} ${esc(a.startTime || '')} ${esc(a.startZone || '')}${a.endDate ? ' → ' + esc(niceDate(a.endDate)) + ' ' + esc(a.endTime || '') + ' ' + esc(a.endZone || '') : ''}</span>${(a.problems || []).length ? `<ul class="small">${a.problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : ''}<div class="actions"><button class="small primary" data-auto-act="review" data-id="${esc(d.documentId)}" data-index="${i}">Review &amp; add</button>${d.tripId || a.tripId ? `<button class="small" data-auto-act="accept" data-id="${esc(d.documentId)}" data-index="${i}">Add as read</button>` : ''}<button class="small quiet" data-auto-act="dismiss" data-id="${esc(d.documentId)}" data-index="${i}">Dismiss</button></div></div>`).join('')}</div><div class="actions">${canCreateTrip && !suggestion ? `<button class="small" data-auto-act="newTrip" data-id="${esc(d.documentId)}">Create trip from this</button>` : ''}<button class="small" data-auto-act="text" data-id="${esc(d.documentId)}" ${!d.auto.sourceText ? 'disabled' : ''}>Extracted text</button><button class="small" data-auto-act="read" data-id="${esc(d.documentId)}">Retry reading</button></div></article>`;
   }).join('') : '<p class="small muted">Unclear matches and reading problems appear here. Clear results are added to the itinerary automatically.</p>';
   renderReaderHealth();
 }
@@ -809,11 +809,20 @@ async function processDocument(id, force = false) {
   }
   markDirty(); render(); readingStatus(d.name + ' · ' + d.status);
 }
+/** True when a document is attached to a trip that none of its dates comes near (one day of slack). */
+function tripMisfit(d, r = d.auto) {
+  const t = byTrip(d.tripId), dates = (r?.segments || []).flatMap(s => [s.activity?.startDate, s.activity?.endDate]).filter(validDate);
+  return !!t && dates.length > 0 && !dates.some(v => v >= addDays(t.startDate, -1) && v <= addDays(t.endDate, 1));
+}
 /** Pick the trip for a reading. Only automatic when exactly one trip clearly fits. */
 function chooseTrip(d, r) {
   const dates = r.segments.flatMap(s => [s.activity.startDate, s.activity.endDate]).filter(validDate);
   const fits = t => dates.length > 0 && dates.every(v => v >= addDays(t.startDate, -1) && v <= addDays(t.endDate, 1)) && dates.some(v => v >= t.startDate && v <= t.endDate);
-  if (d.tripId && byTrip(d.tripId)) return fits(byTrip(d.tripId)) || !dates.length ? {tripId: d.tripId, automatic: true, reason: 'Assigned trip kept.'} : {tripId: d.tripId, automatic: false, reason: 'The dates fall outside the assigned trip; check the dates or the trip.'};
+  const assigned = byTrip(d.tripId);
+  if (assigned && (fits(assigned) || !dates.length)) return {tripId: d.tripId, automatic: true, reason: 'Assigned trip kept.'};
+  if (assigned && !tripMisfit(d, r)) return {tripId: d.tripId, automatic: false, reason: 'The dates fall outside the assigned trip; check the dates or the trip.'};
+  // Not one date is near the assigned trip: that assignment was wrong, so match as if the document had none.
+  if (assigned) return {...chooseTrip({...d, tripId: ''}, r), movedFrom: assigned.name};
   if (!dates.length) return {tripId: '', automatic: false, reason: 'No dates were read, so no trip could be chosen.'};
   const suggested = byTrip(r.trip?.matchedTripId);
   const candidates = state.trips.filter(fits);
@@ -896,8 +905,10 @@ function findChanged(a) { return a.confirmation && state.activities.find(x => x.
 function linkDocument(a, d) { if (!splitIds(a.documentIds).includes(d.documentId)) a.documentIds = [...splitIds(a.documentIds), d.documentId].join('|'); if (!d.activityId) d.activityId = a.activityId }
 function applyReading(d, r, note = '') {
   let match = chooseTrip(d, r), newTrip = null;
+  const movedFrom = match.movedFrom; if (movedFrom) d.tripId = '';
   if (!match.automatic && match.noTrip && setting('autoTrips') !== 'off' && (newTrip = autoTrip(d, r)))
     match = {tripId: newTrip.tripId, automatic: true, reason: 'New trip “' + newTrip.name + '” created from this document.'};
+  if (movedFrom) match.reason += ` (It was attached to “${movedFrom}”, whose dates it does not overlap.)`;
   // Predictable IDs: two devices applying the same reading produce the same records, never duplicates.
   const stamp = (d.hash || '').slice(0, 8) || 'local';
   if (match.automatic && !d.tripId) d.tripId = match.tripId;
@@ -1334,6 +1345,7 @@ function bindEvents() {
       case 'dismiss': resolveReviewItem(id, index); markDirty(); render(); break;
       case 'newTrip': createTripFromDoc(id); break;
       case 'createSuggested': createSuggestedTrip(id); break;
+      case 'rematch': { const d = docById(id); if (d) { d.tripId = ''; reapplyReading(d); markDirty(); render(); toast(d.tripId ? 'Moved to “' + byTrip(d.tripId).name + '”.' : 'No trip fits these dates. Create the suggested trip.') } break }
       case 'text': showExtractedText(id); break;
     }
   });

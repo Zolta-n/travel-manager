@@ -108,6 +108,9 @@ class NormalizeTests(unittest.TestCase):
                       end=point("2026-06-03", "11:00", "Europe/Lisbon"))
         seg = normalize_result(result(old, trip=""), TRIPS, today=date(2026, 11, 9))["segments"][0]
         self.assertFalse(seg["autoOk"])
+        # A past trip logged later is fine when it falls shortly after the printed issue date.
+        issued = {**result(old, trip=""), "documentDate": "2026-05-20"}
+        self.assertTrue(normalize_result(issued, TRIPS, today=date(2026, 11, 9))["segments"][0]["autoOk"])
 
     def test_model_trip_match_needs_real_overlap(self):
         # The day after a trip ends is a new trip, not part of the old one.

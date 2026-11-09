@@ -384,7 +384,7 @@ def _inside(day, trip, slack=1):
     return date.fromisoformat(trip["startDate"]) - timedelta(days=slack) <= d <= date.fromisoformat(trip["endDate"]) + timedelta(days=slack)
 
 
-def normalize_segment(raw, trips, matched_trip, today=None):
+def normalize_segment(raw, trips, matched_trip, today=None, issued=None):
     today = today or date.today()
     problems, flags = [], []
     category = raw.get("category") if raw.get("category") in CATEGORIES else "Other"
@@ -417,7 +417,9 @@ def normalize_segment(raw, trips, matched_trip, today=None):
         flags.append("Year was not printed and was inferred.")
         known = any(_inside(start["date"], t) for t in ([matched_trip] if matched_trip else trips))
         when = _valid_day(start["date"])
-        if not known and when and not today - timedelta(days=14) <= when <= today + timedelta(days=400):
+        # Plausible: near today, or within a year after the printed issue date (a past trip logged later).
+        issued_ok = issued is not None and when is not None and issued <= when <= issued + timedelta(days=400)
+        if not known and when and not issued_ok and not today - timedelta(days=14) <= when <= today + timedelta(days=400):
             problems.append("The inferred year puts this more than two weeks in the past or over a year ahead; confirm the year.")
     if raw.get("timeZoneInferred"):
         flags.append("Time zone derived from the location.")
@@ -463,7 +465,7 @@ def normalize_result(raw, trips, today=None):
     for item in (raw.get("segments") or [])[:40]:
         if not isinstance(item, dict):
             continue
-        seg = normalize_segment(item, trips, matched, today)
+        seg = normalize_segment(item, trips, matched, today, _valid_day(raw.get("documentDate")))
         key = _segment_key(seg)
         if key in seen:
             continue
