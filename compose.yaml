@@ -1,8 +1,10 @@
 services:
   travel-manager:
-    image: travel-manager-easy-${TRAVEL_INSTALL_ID:?Run install.sh}:local
+    # Built and tested by GitHub Actions; Watchtower on the NAS pulls new versions automatically.
+    image: ghcr.io/zolta-n/travel-manager:latest
     labels:
       org.travel-manager.easy.install: ${TRAVEL_INSTALL_ID:?Run install.sh}
+      com.centurylinklabs.watchtower.enable: "true"
     user: "10001:10001"
     init: true
     restart: unless-stopped

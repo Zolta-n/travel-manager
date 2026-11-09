@@ -14,14 +14,17 @@ from pathlib import Path
 import re
 import secrets
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from ai_reader import AIConfig, AIError, JobBoard, build_content, build_context, build_request, call_claude, normalize_result
 from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate
 from store import Conflict, StateError, Store
 
 MAX_REQUEST_BYTES = 60 * 1024 * 1024
-SESSION_SECONDS = 12 * 60 * 60
+SESSION_SECONDS = 30 * 24 * 60 * 60  # sliding: renewed (at most daily) while a device keeps using the app
+SESSION_RENEW_AFTER = 24 * 60 * 60
+LOGIN_WINDOW, LOGIN_PER_DEVICE, LOGIN_TOTAL = 600, 5, 60
+QUIET_PATHS = ("/api/revision", "/api/session", "/api/analysis", "/api/analyze/")
 LOGGER = logging.getLogger("travel_manager")
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; "
@@ -101,15 +104,50 @@ class Application:
         self.store = Store(config.data_dir, config.seed_path)
         self.work_dir = (config.work_dir or (self.store.root / "reader-work")).resolve()
         self.work_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-        self.salt = secrets.token_bytes(32)
-        self.password_hash = self._password_hash(config.password)
+        self._load_password(config.password)
         self.cookie_name = "__Host-travel_session" if config.secure_cookie else "travel_session"
         self.readers = ReaderGate()
         self.ai = config.ai or AIConfig(api_key="")
         self.jobs = JobBoard()
-        # Restarting or changing the password invalidates every session.
+
+    def _load_password(self, password):
+        """Sessions survive restarts; only a changed password signs every device out."""
+        salt, stored = self.store.meta_get("password_salt"), self.store.meta_get("password_scrypt")
+        if salt and stored:
+            self.salt = bytes.fromhex(salt)
+            self.password_hash = self._password_hash(password)
+            if hmac.compare_digest(self.password_hash.hex(), stored):
+                with self.store.connect() as db:
+                    kept = db.execute("SELECT COUNT(*) FROM sessions WHERE expires>?", (time.time(),)).fetchone()[0]
+                LOGGER.info("Started; %d signed-in device session(s) kept", kept)
+                return
+        self.salt = secrets.token_bytes(32)
+        self.password_hash = self._password_hash(password)
         with self.store.connect() as db:
             db.execute("DELETE FROM sessions")
+        self.store.meta_set({"password_salt": self.salt.hex(), "password_scrypt": self.password_hash.hex()})
+        LOGGER.info("Started; password is new or changed, so all sessions were ended")
+
+    @staticmethod
+    def client_id(env):
+        """The real device address. Behind the local Cloudflare tunnel every request comes from
+        127.0.0.1/the Docker bridge, so use CF-Connecting-IP (set by Cloudflare) in that case only."""
+        remote = env.get("REMOTE_ADDR", "")
+        try:
+            local = ipaddress.ip_address(remote).is_private or ipaddress.ip_address(remote).is_loopback
+        except ValueError:
+            local = False
+        forwarded = env.get("HTTP_CF_CONNECTING_IP", "").strip()
+        if local and forwarded:
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+        return remote or "unknown"
+
+    @staticmethod
+    def short(value):
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
 
     def _password_hash(self, password):
         return hashlib.scrypt(password.encode("utf-8"), salt=self.salt, n=16384, r=8, p=1, dklen=32)
@@ -124,12 +162,27 @@ class Application:
         return headers
 
     def __call__(self, environ, start_response):
+        started = time.monotonic()
+        response = self._respond(environ, start_response)
+        status = environ.get("travel.status", 0)
+        path = environ.get("PATH_INFO", "/")
+        if path.startswith("/api/") and (status >= 400 or environ.get("REQUEST_METHOD") != "GET" or not path.startswith(QUIET_PATHS)):
+            # Never logs bodies, cookies, passwords or document contents.
+            LOGGER.info("%s %s -> %s in %d ms (device %s)%s", environ.get("REQUEST_METHOD"), path, status,
+                        (time.monotonic() - started) * 1000, self.short(self.client_id(environ)),
+                        " " + environ["travel.note"] if environ.get("travel.note") else "")
+        return response
+
+    def _respond(self, environ, start_response):
         headers = self._security_headers()
         try:
             status, result, extra, stream = self.dispatch(environ)
             headers.extend(extra)
+            if environ.get("travel.cookie") and not any(k == "Set-Cookie" for k, _ in headers):
+                headers.append(environ["travel.cookie"])
             if stream:
                 headers.append(("Content-Type", "application/json; charset=utf-8"))
+                environ["travel.status"] = status
                 start_response(str(status) + " " + HTTPStatus(status).phrase, headers)
                 return (chunk.encode("utf-8") for chunk in result)
             if isinstance(result, bytes):
@@ -138,12 +191,14 @@ class Application:
                 body = json.dumps(result, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
                 headers.append(("Content-Type", "application/json; charset=utf-8"))
         except Conflict as exc:
+            environ["travel.note"] = "conflict: device had revision %s, server has %s" % (environ.get("travel.base"), exc.revision)
             status, body = self.error_body(409, str(exc), "revision_conflict", {"revision": exc.revision})
         except StateError as exc:
             status, body = self.error_body(400, str(exc), "invalid_state")
         except (ReaderError, AIError) as exc:
             status, body = self.error_body(exc.status, str(exc), exc.code)
         except APIError as exc:
+            environ["travel.note"] = environ.get("travel.note") or exc.code
             status, body = self.error_body(exc.status, exc.message, exc.code, exc.extra)
         except Exception:
             LOGGER.exception("Request failed; private state and credentials are never included in application log messages")
@@ -151,6 +206,7 @@ class Application:
         if not any(key.lower() == "content-type" for key, _ in headers):
             headers.append(("Content-Type", "application/json; charset=utf-8"))
         headers.append(("Content-Length", str(len(body))))
+        environ["travel.status"] = status
         start_response(str(status) + " " + HTTPStatus(status).phrase, headers)
         return [b"" if environ.get("REQUEST_METHOD") == "HEAD" else body]
 
@@ -227,9 +283,13 @@ class Application:
         if item is None or not re.fullmatch(r"[A-Za-z0-9_-]{43}", item.value):
             return None, None
         digest = hashlib.sha256(item.value.encode("ascii")).hexdigest()
+        now = time.time()
         with self.store.connect() as db:
-            db.execute("DELETE FROM sessions WHERE expires<=?", (time.time(),))
-            row = db.execute("SELECT * FROM sessions WHERE token_hash=? AND expires>?", (digest, time.time())).fetchone()
+            db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
+            row = db.execute("SELECT * FROM sessions WHERE token_hash=? AND expires>?", (digest, now)).fetchone()
+            if row is not None and row["expires"] - now < SESSION_SECONDS - SESSION_RENEW_AFTER:
+                db.execute("UPDATE sessions SET expires=? WHERE token_hash=?", (now + SESSION_SECONDS, digest))
+                env["travel.cookie"] = self.cookie(item.value, SESSION_SECONDS)
             return row, digest
 
     def require_auth(self, env, csrf=False):
@@ -253,19 +313,23 @@ class Application:
         password = payload.get("password")
         if set(payload) != {"password"} or not isinstance(password, str) or len(password) > 1024:
             raise APIError(400, "Supply a password string.")
-        client = hashlib.sha256(env.get("REMOTE_ADDR", "unknown").encode("utf-8")).hexdigest()
+        client = hashlib.sha256(self.client_id(env).encode("utf-8")).hexdigest()
         now = time.time()
         # Reserve an attempt before hashing, so simultaneous requests cannot bypass the limit.
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("DELETE FROM login_attempts WHERE attempted_at<?", (now - 600,))
+            db.execute("DELETE FROM login_attempts WHERE attempted_at<?", (now - LOGIN_WINDOW,))
             local = db.execute("SELECT COUNT(*) FROM login_attempts WHERE client=?", (client,)).fetchone()[0]
             total = db.execute("SELECT COUNT(*) FROM login_attempts").fetchone()[0]
-            if local >= 5 or total >= 50:
-                raise APIError(429, "Too many sign-in attempts. Wait 10 minutes before trying again.", "rate_limited", {"retryAfter": 600})
+            if local >= LOGIN_PER_DEVICE or total >= LOGIN_TOTAL:
+                oldest = db.execute("SELECT MIN(attempted_at) FROM login_attempts" + (" WHERE client=?" if local >= LOGIN_PER_DEVICE else ""),
+                                    (client,) if local >= LOGIN_PER_DEVICE else ()).fetchone()[0] or now
+                wait = max(60, int(oldest + LOGIN_WINDOW - now))
+                raise APIError(429, "Too many sign-in attempts from this device. Try again in %d minute(s)." % ((wait + 59) // 60), "rate_limited", {"retryAfter": wait})
             db.execute("INSERT INTO login_attempts VALUES (?, ?)", (client, now))
         if not hmac.compare_digest(self._password_hash(password), self.password_hash):
-            raise APIError(401, "Incorrect password.", "bad_credentials")
+            env["travel.note"] = "wrong password"
+            raise APIError(401, "Incorrect password. Copy it from private/LOGIN.txt; it is long and case-sensitive.", "bad_credentials")
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         old, old_digest = self.session(env)
         with self.store.connect() as db:
@@ -287,6 +351,9 @@ class Application:
             ("POST", "/api/logout"): self.logout,
             ("GET", "/api/revision"): self.get_revision,
             ("GET", "/api/state"): self.get_state,
+            ("GET", "/api/original"): self.get_original,
+            ("GET", "/api/analysis"): self.list_analysis,
+            ("GET", "/api/analysis/result"): self.get_analysis,
             ("PUT", "/api/state"): self.put_state,
             ("GET", "/api/readers"): self.get_readers,
             ("POST", "/api/read"): self.read_document,
@@ -341,16 +408,51 @@ class Application:
         self.require_auth(env)
         return self.ok({"revision": self.store.revision()})
 
+    @staticmethod
+    def query(env, name):
+        values = parse_qs(env.get("QUERY_STRING", ""), max_num_fields=10).get(name, [""])
+        return values[0]
+
     def get_state(self, env):
         self.require_auth(env)
-        return self.ok(self.store.get())
+        # ?originals=0 returns documents without file contents (fast on phones); files load on demand.
+        return self.ok(self.store.get(originals=self.query(env, "originals") != "0"))
 
     def put_state(self, env):
         self.require_auth(env, csrf=True)
         payload = self.read_json(env)
         if set(payload) != {"state", "revision"}:
             raise APIError(400, "Supply state and revision.")
-        return self.ok({"revision": self.store.put(payload["state"], payload["revision"])})
+        env["travel.base"] = payload["revision"]
+        revision = self.store.put(payload["state"], payload["revision"])
+        env["travel.note"] = "saved revision %d (%d KB)" % (revision, int(env.get("CONTENT_LENGTH") or 0) // 1024)
+        return self.ok({"revision": revision})
+
+    def _document_id(self, env):
+        identifier = self.query(env, "documentId")
+        if not 1 <= len(identifier) <= 256:
+            raise APIError(400, "Supply a documentId.")
+        return identifier
+
+    def get_original(self, env):
+        self.require_auth(env)
+        try:
+            binary, _, _ = self.store.original(self._document_id(env))
+        except KeyError:
+            raise APIError(404, "Document not found.", "not_found") from None
+        # Served as an opaque download; the page builds a typed Blob itself.
+        return self.ok(binary, [("Content-Type", "application/octet-stream")])
+
+    def list_analysis(self, env):
+        self.require_auth(env)
+        return self.ok({"results": self.store.ai_results()})
+
+    def get_analysis(self, env):
+        self.require_auth(env)
+        try:
+            return self.ok(self.store.ai_result(self._document_id(env)))
+        except KeyError:
+            raise APIError(404, "No finished reading for this document.", "not_found") from None
 
     def get_readers(self, env):
         self.require_auth(env)
@@ -382,7 +484,15 @@ class Application:
         if not self.ai.enabled:
             raise APIError(503, "AI reading is not configured. Add an Anthropic API key with install.sh --set-ai-key.", "ai_disabled")
         identifier, path, mime, name = self._document_from(env)
-        job = self.jobs.submit(identifier, lambda: self.analyze(path, mime, name))
+        env["travel.note"] = "AI reading queued"
+
+        def work():
+            result = self.analyze(path, mime, name)
+            result["created"] = time.time()
+            self.store.save_ai_result(identifier, Path(path).parent.name + Path(path).name, result, result["created"])
+            LOGGER.info("AI reading finished: %d segment(s), %s", len(result["segments"]), result.get("method", ""))
+            return result
+        job = self.jobs.submit(identifier, work)
         return self.ok({"jobId": job})
 
     def analysis_status(self, env, job_id):
@@ -394,8 +504,10 @@ class Application:
 
     def backup(self, env):
         self.require_auth(env)
-        name = "travel-nas-backup-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + ".json"
-        return self.ok(self.store.backup_chunks(), [("Content-Disposition", 'attachment; filename="' + name + '"')], stream=True)
+        current = self.query(env, "scope") == "current"
+        name = ("Travel_Manager_Backup_" if current else "travel-nas-backup-") + time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + ".json"
+        chunks = self.store.current_backup_chunks() if current else self.store.backup_chunks()
+        return self.ok(chunks, [("Content-Disposition", 'attachment; filename="' + name + '"')], stream=True)
 
     # ------------------------------------------------------------ AI reading (background thread)
 
@@ -424,7 +536,7 @@ class Application:
         state = self.store.metadata()
         raw, usage = call_claude(build_request(content, build_context(state), name, self.ai.model), self.ai)
         result = normalize_result(raw, state.get("trips", []))
-        result.update(method=method + " (" + usage["model"] + ")", usage=usage, sourceText=source_text[:100000],
+        result.update(method=method + " (" + usage["model"] + ")", usage=usage, sourceText=source_text[:20000],
                       processedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         return result
 

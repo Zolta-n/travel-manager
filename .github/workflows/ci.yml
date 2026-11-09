@@ -1,0 +1,59 @@
+name: Test and publish
+
+# Pull requests: tests only. Merge to main: tests, then publish the image that
+# Watchtower on the NAS installs within ~5 minutes. Nothing is published if a test fails.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PDF and OCR tools (same as the image)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng
+      - name: Python dependencies
+        run: pip install -r requirements.txt
+      - name: Installer is valid POSIX sh
+        run: sh -n install.sh
+      - name: PACKAGE.sha256 is up to date
+        run: python tools/build_nas_package.py && git diff --exit-code PACKAGE.sha256
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/zolta-n/travel-manager:latest
+            ghcr.io/zolta-n/travel-manager:${{ github.sha }}
+      - name: NAS upgrade package (for installer changes)
+        run: python tools/build_nas_package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Travel_Manager_NAS_Easy_Setup_v2
+          path: dist/Travel_Manager_NAS_Easy_Setup_v2.zip

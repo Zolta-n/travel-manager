@@ -137,7 +137,9 @@ OUTPUT_SCHEMA = {
             "reason": _string(),
             "newTripName": {"type": "string", "description": "Suggested trip name if no existing trip fits, else empty."},
             "newTripDestination": _string(),
-        }, "required": ["matchedTripId", "reason", "newTripName", "newTripDestination"],
+            "newTripType": {"type": "string", "enum": ["Business", "Private"],
+                            "description": "For a suggested new trip: Business (work travel, company booking, conference, corporate rate) or Private."},
+        }, "required": ["matchedTripId", "reason", "newTripName", "newTripDestination", "newTripType"],
             "additionalProperties": False},
         "warnings": {"type": "array", "items": _string()},
     },
@@ -166,7 +168,7 @@ Other fields
 - confidence: "high" only when the date, time and place of both ends are clearly printed (or the end is legitimately absent, e.g. a meal); "medium" when something was inferred; "low" when you are unsure.
 - evidence: a short verbatim quote containing the main date/time you used.
 - costs: only totals that are explicitly printed with a currency (grand total, amount paid, invoice total). Never sum or estimate. Use kind "Estimate" for quoted prices not yet paid.
-- trip: you receive the traveller's existing trips. Set matchedTripId only when the segments clearly fall inside that trip's dates (allow one day either side) and destination. Business and private trips can overlap; if more than one could fit, leave it empty and explain in reason. If none fits, suggest newTripName and newTripDestination.
+- trip: you receive the traveller's existing trips. Set matchedTripId only when the segments clearly fall inside that trip's dates (allow one day either side) and destination. Business and private trips can overlap; if more than one could fit, leave it empty and explain in reason. If none fits, suggest newTripName (short, e.g. "Detroit business trip" or "Kyoto spring holiday"), newTripDestination and newTripType.
 - Write all output text in English, but copy names, addresses and references exactly as printed."""
 
 
@@ -479,7 +481,8 @@ def normalize_result(raw, trips):
         "segments": segments, "costs": costs,
         "trip": {"matchedTripId": matched_id if matched else "", "reason": _text(trip_raw.get("reason"), 400),
                  "newTripName": _text(trip_raw.get("newTripName"), 120),
-                 "newTripDestination": _text(trip_raw.get("newTripDestination"), 200)},
+                 "newTripDestination": _text(trip_raw.get("newTripDestination"), 200),
+                 "newTripType": trip_raw.get("newTripType") if trip_raw.get("newTripType") in ("Business", "Private") else "Business"},
         "warnings": [_text(x, 300) for x in (raw.get("warnings") or [])[:10] if _text(x)],
     }
 

@@ -10,3 +10,4 @@ private/*
 __pycache__/
 *.pyc
 .qa*/
+dist/

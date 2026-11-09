@@ -1,7 +1,7 @@
 FROM python:3.12-slim-bookworm
 
-ARG TRAVEL_INSTALL_ID
-LABEL org.travel-manager.easy.install=$TRAVEL_INSTALL_ID
+LABEL org.opencontainers.image.source="https://github.com/Zolta-n/travel-manager" \
+      org.opencontainers.image.description="Travel Manager NAS - private travel itinerary app"
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 TMPDIR=/run/travel-reader \

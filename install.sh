@@ -52,7 +52,8 @@ cleanup() {
     exit "$result"
 }
 usage() {
-    note 'Usage: /bin/sh /absolute/app/install.sh [--check|--plan] [--host exact.https.hostname[:port]] [--build]'
+    note 'Usage: /bin/sh /absolute/app/install.sh [--check|--plan] [--host exact.https.hostname[:port]] [--build|--pull]'
+    note '--build / --pull   download the latest tested app image from GitHub now (normally Watchtower does this).'
     note '       [--rotate-password] [--set-ai-key | --remove-ai-key]'
     note '--rotate-password  new random password in .env and private/LOGIN.txt; every device must sign in again.'
     note '--set-ai-key       reads private/ANTHROPIC_API_KEY.txt (only the key), stores it in .env, deletes the text file.'
@@ -62,7 +63,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --check|--plan) MODE=check; shift ;;
         --host) [ "$#" -ge 2 ] && [ -z "$HOST" ] || fail '--host requires one exact hostname.'; HOST=$2; shift 2 ;;
-        --build) REBUILD=true; shift ;;
+        --build|--pull) REBUILD=true; shift ;;
         --rotate-password) ROTATE=true; shift ;;
         --set-ai-key) [ -z "$KEY_ACTION" ] || fail 'Use only one AI key option.'; KEY_ACTION=set; shift ;;
         --remove-ai-key) [ -z "$KEY_ACTION" ] || fail 'Use only one AI key option.'; KEY_ACTION=remove; shift ;;
@@ -118,6 +119,20 @@ private_file() {
     [ "$(stat -c %u "$1")" = "$(id -u)" ] || fail 'Existing installer state and .env must belong to root.'
 }
 for d in private web; do check_dir "$DIR/$d"; done
+# File Station extraction into an ACL share can leave package files group/world writable.
+# As root, repair only the fixed package allowlist below (owned by root or the uploader), never data or config.
+if [ "$MODE" = install ] && [ "$(id -u)" = 0 ]; then
+    for f in .easy-package PACKAGE.sha256 install.sh Dockerfile .dockerignore compose.yaml easy_data.py ai_reader.py app.py store.py extractor.py reader_worker.py server.py initialize_data.py requirements.txt web/index.html private/seed.json; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        fowner=$(stat -c %u "$f"); fmode=$(stat -c %a "$f")
+        [ "$fowner" = 0 ] || [ "$fowner" = "$PACKAGE_UID" ] || continue
+        if [ "$((0$fmode & 022))" -ne 0 ]; then
+            strip_acl "$f"
+            chmod 600 "$f" || fail "Cannot repair permissions of $f (E_PRIVATE_MODE)."
+            note "Repaired permissions of $f (File Station extraction)."
+        fi
+    done
+fi
 for f in .easy-package PACKAGE.sha256 install.sh Dockerfile .dockerignore compose.yaml easy_data.py ai_reader.py app.py store.py extractor.py reader_worker.py server.py initialize_data.py requirements.txt web/index.html private/seed.json; do safe_file "$DIR/$f"; done
 [ "$(cat .easy-package)" = travel-manager-nas-easy-v2 ] || fail 'Wrong package marker.'
 # The fixed path allowlist also prevents a modified manifest from reading outside this package.
@@ -249,7 +264,10 @@ if [ "$MODE" = install ] && [ -z "$ID" ]; then
     make_private .installer/id 600
 fi
 PROJECT=tme$ID
-IMAGE=travel-manager-easy-$ID:local
+# The app image is built and tested by GitHub Actions and published to ghcr.io; Watchtower keeps it current.
+IMAGE=ghcr.io/zolta-n/travel-manager:latest
+IMAGE_SOURCE=https://github.com/Zolta-n/travel-manager
+LEGACY_IMAGE=travel-manager-easy-$ID:local
 inspect() { "$DOCKER" inspect --format "$1" "$2" 2>/dev/null; }
 owned() {
     [ "$(inspect '{{index .Config.Labels "org.travel-manager.easy.install"}}' "$1")" = "$ID" ] &&
@@ -257,7 +275,7 @@ owned() {
     [ "$(inspect '{{index .Config.Labels "com.docker.compose.service"}}' "$1")" = travel-manager ] &&
     [ "$(inspect '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$1")" = "$DIR" ] &&
     [ "$(inspect '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$1")" = "$DIR/compose.yaml" ] &&
-    [ "$(inspect '{{.Config.Image}}' "$1")" = "$IMAGE" ]
+    case "$(inspect '{{.Config.Image}}' "$1")" in "$IMAGE"|"$LEGACY_IMAGE") ;; *) return 1 ;; esac
 }
 OWN_RUNNING=false
 if [ -n "$ID" ]; then
@@ -289,14 +307,14 @@ if [ "$OWN_RUNNING" != true ]; then
 fi
 HAVE_IMAGE=false
 if [ -n "$ID" ] && "$DOCKER" image inspect "$IMAGE" >/dev/null 2>&1; then
-    [ "$("$DOCKER" image inspect --format '{{index .Config.Labels "org.travel-manager.easy.install"}}' "$IMAGE" 2>/dev/null)" = "$ID" ] || fail 'Image tag collision; unrelated images are never overwritten.'
+    [ "$("$DOCKER" image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$IMAGE" 2>/dev/null)" = "$IMAGE_SOURCE" ] || fail 'The local ghcr.io/zolta-n/travel-manager image is not from the expected repository; nothing was replaced.'
     HAVE_IMAGE=true
 fi
 if [ "$MODE" = check ]; then
     note 'CHECK ONLY: package/path checks, daemon, Compose and port preflight passed. Nothing created or started.'
     note "Configured HTTPS authority: $HOST (HTTPS/reverse proxy itself is NOT checked)."
-    note 'Install will create private config/credentials, build or reuse a project-specific image, prepare only ./data, start one loopback-only service, and wait at most 120 seconds for local health.'
-    note 'No NAS/network/HTTPS settings or existing apps will be changed. Docker image build and OCR runtime remain untested by this check.'
+    note 'Install will create private config/credentials, download or reuse the tested app image from GitHub, prepare only ./data, start one loopback-only service, and wait at most 120 seconds for local health.'
+    note 'No NAS/network/HTTPS settings or existing apps will be changed. The image download and OCR runtime remain untested by this check.'
     exit 0
 fi
 STATUS_ENABLED=true
@@ -346,14 +364,14 @@ fi
 if [ ! -e private/LOGIN.txt ]; then write_login private/LOGIN.txt; fi
 # Never emit subprocess output: even Compose errors can contain interpolated secrets.
 if [ "$HAVE_IMAGE" != true ] || [ "$REBUILD" = true ]; then
-    STAGE='Building private project image'; write_status
-    note 'Building the project-specific OCR image. First build needs internet and may take several minutes; output is suppressed to keep task logs private.'
-    "$DOCKER" build --build-arg "TRAVEL_INSTALL_ID=$ID" --tag "$IMAGE" "$DIR" >/dev/null 2>&1 || fail 'Docker build failed (network, architecture, disk or dependency availability). No success claimed. Fix Container Manager/build availability and rerun the same task; private config is retained.'
+    STAGE='Downloading the tested app image'; write_status
+    note 'Downloading the tested app image from GitHub (ghcr.io). Output is suppressed to keep task logs private.'
+    "$DOCKER" pull "$IMAGE" >/dev/null 2>&1 || fail 'Could not download the app image from ghcr.io (E_IMAGE_PULL). Check the NAS internet connection and that the GitHub package is public; private config is retained.'
 fi
-[ "$("$DOCKER" image inspect --format '{{index .Config.Labels "org.travel-manager.easy.install"}}' "$IMAGE" 2>/dev/null)" = "$ID" ] || fail 'Built image identity check failed.'
+[ "$("$DOCKER" image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$IMAGE" 2>/dev/null)" = "$IMAGE_SOURCE" ] || fail 'Downloaded image identity check failed (E_IMAGE_SOURCE).'
 # The app runs as UID 10001: confirm it can read every program file before touching data.
 image_check=$("$DOCKER" run --rm -i --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 16 --memory 128m --entrypoint python "$IMAGE" -c 'import os; bad=[1 for d,_,fs in os.walk("/app") for f in fs if not os.access(os.path.join(d,f),os.R_OK)]; print("E_APP_UNREADABLE" if bad or not os.access("/app/app.py",os.R_OK) else "OK")' < /dev/null 2>/dev/null) || image_check=E_IMAGE_CHECK_FAILED
-[ "$image_check" = OK ] || fail "The image cannot read its own program files (reason ${image_check:-E_IMAGE_CHECK_FAILED}). Rerun this task with --build."
+[ "$image_check" = OK ] || fail "The image cannot read its own program files (reason ${image_check:-E_IMAGE_CHECK_FAILED}). Rerun this task with --pull."
 if [ ! -d data ]; then mkdir -m 700 data; fi
 [ -d data ] && [ ! -L data ] || fail 'Unsafe data directory.'
 DATA_MODE=$(stat -c %a data)
