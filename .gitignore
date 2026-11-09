@@ -1,0 +1,12 @@
+# Secrets and live data never belong in git
+.env
+.env.new
+.installer/
+.install.lock
+data/
+private/*
+!private/.gitkeep
+# The real itinerary seed stays only on the NAS (its checksum is in PACKAGE.sha256)
+__pycache__/
+*.pyc
+.qa*/

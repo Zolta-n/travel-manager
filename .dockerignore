@@ -1,0 +1,16 @@
+# Allowlist build inputs: no data, seeds, credentials, logs, state, or tests.
+**
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!ai_reader.py
+!app.py
+!store.py
+!extractor.py
+!reader_worker.py
+!server.py
+!initialize_data.py
+!easy_data.py
+!web/
+web/**
+!web/index.html

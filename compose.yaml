@@ -1,0 +1,36 @@
+services:
+  travel-manager:
+    image: travel-manager-easy-${TRAVEL_INSTALL_ID:?Run install.sh}:local
+    labels:
+      org.travel-manager.easy.install: ${TRAVEL_INSTALL_ID:?Run install.sh}
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      TRAVEL_PASSWORD: ${TRAVEL_PASSWORD:?Set a strong unique password in .env first}
+      TRAVEL_ALLOWED_HOSTS: ${TRAVEL_ALLOWED_HOSTS:?Set your exact external host in .env first}
+      TRAVEL_SECURE_COOKIE: "true"
+      # Optional. Set with install.sh --set-ai-key; empty means local readers only.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TRAVEL_DATA_DIR: /data
+      TRAVEL_SEED_PATH: /data/seed.json
+      TRAVEL_WORK_DIR: /run/travel-reader
+    volumes:
+      - ./data:/data:rw
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777,noexec,nosuid,nodev
+      - /run/travel-reader:size=128m,mode=0700,uid=10001,gid=10001,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

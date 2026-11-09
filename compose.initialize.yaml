@@ -1,0 +1,24 @@
+# ONE TIME ONLY. Read START_HERE.md before using.
+# Run this separate GUI project in the SAME folder as compose.yaml.
+# It refuses any data directory containing anything except seed.json.
+services:
+  prepare-new-data-folder:
+    build:
+      context: .
+    image: travel-manager-nas:local
+    user: "0:0"
+    command: ["python", "initialize_data.py"]
+    restart: "no"
+    network_mode: none
+    volumes:
+      - ./data:/data:rw
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 16
+    mem_limit: 128m
