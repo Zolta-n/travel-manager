@@ -1,4 +1,5 @@
 import base64
+from datetime import date
 import io
 import json
 from pathlib import Path
@@ -96,6 +97,24 @@ class NormalizeTests(unittest.TestCase):
                           end=point("2028-11-11", "14:35", "America/Detroit"))
         seg = normalize_result(result(outside, trip=""), TRIPS)["segments"][0]
         self.assertFalse(seg["autoOk"])
+
+    def test_inferred_year_for_a_new_trip_soon_is_fine(self):
+        # A booking next month that fits no trip is a new trip, not a doubtful year.
+        soon = segment(yearInferred=True, start=point("2026-12-03", "09:00", "Europe/Berlin"),
+                       end=point("2026-12-03", "11:00", "Europe/Lisbon"))
+        seg = normalize_result(result(soon, trip=""), TRIPS, today=date(2026, 11, 9))["segments"][0]
+        self.assertTrue(seg["autoOk"], seg["problems"])
+        old = segment(yearInferred=True, start=point("2026-06-03", "09:00", "Europe/Berlin"),
+                      end=point("2026-06-03", "11:00", "Europe/Lisbon"))
+        seg = normalize_result(result(old, trip=""), TRIPS, today=date(2026, 11, 9))["segments"][0]
+        self.assertFalse(seg["autoOk"])
+
+    def test_model_trip_match_needs_real_overlap(self):
+        # The day after a trip ends is a new trip, not part of the old one.
+        after = segment(start=point("2026-11-22", "09:00", "America/Detroit"), end=point("2026-11-22", "11:00", "America/Chicago"))
+        self.assertEqual(normalize_result(result(after), TRIPS)["trip"]["matchedTripId"], "")
+        last_day = segment(start=point("2026-11-21", "09:00", "America/Detroit"), end=point("2026-11-22", "11:00", "Asia/Shanghai"))
+        self.assertEqual(normalize_result(result(last_day), TRIPS)["trip"]["matchedTripId"], "t-us")
 
     def test_model_trip_match_is_dropped_when_dates_do_not_fit(self):
         out = normalize_result(result(segment(), trip="t-jp"), TRIPS)

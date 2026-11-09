@@ -135,7 +135,7 @@ OUTPUT_SCHEMA = {
         "trip": {"type": "object", "properties": {
             "matchedTripId": {"type": "string", "description": "tripId of the existing trip this belongs to, or empty."},
             "reason": _string(),
-            "newTripName": {"type": "string", "description": "Suggested trip name if no existing trip fits, else empty."},
+            "newTripName": {"type": "string", "description": "Suggested name for a new trip for this booking. Always filled, even when matchedTripId is set."},
             "newTripDestination": _string(),
             "newTripType": {"type": "string", "enum": ["Business", "Private"],
                             "description": "For a suggested new trip: Business (work travel, company booking, conference, corporate rate) or Private."},
@@ -168,7 +168,7 @@ Other fields
 - confidence: "high" only when the date, time and place of both ends are clearly printed (or the end is legitimately absent, e.g. a meal); "medium" when something was inferred; "low" when you are unsure.
 - evidence: a short verbatim quote containing the main date/time you used.
 - costs: only totals that are explicitly printed with a currency (grand total, amount paid, invoice total). Never sum or estimate. Use kind "Estimate" for quoted prices not yet paid.
-- trip: you receive the traveller's existing trips. Set matchedTripId only when the segments clearly fall inside that trip's dates (allow one day either side) and destination. Business and private trips can overlap; if more than one could fit, leave it empty and explain in reason. If none fits, suggest newTripName (short, e.g. "Detroit business trip" or "Kyoto spring holiday"), newTripDestination and newTripType.
+- trip: you receive the traveller's existing trips. Set matchedTripId only when the segments clearly fall inside that trip's own dates (one day of slack at the edges only, never for the whole booking) and match its destination. A booking that lies entirely before or after a trip, even back-to-back, is a new trip: leave matchedTripId empty. Do not pick the nearest trip just because it is close. Business and private trips can overlap; if more than one could fit, leave it empty and explain in reason. Always suggest newTripName (short, with the place, e.g. "Detroit business trip" or "Kyoto spring holiday"), newTripDestination (city, country) and newTripType, so a new trip can be created if the match is rejected.
 - Write all output text in English, but copy names, addresses and references exactly as printed."""
 
 
@@ -373,6 +373,10 @@ def _trip_for(trip_id, trips):
     return next((t for t in trips if t.get("tripId") == trip_id), None)
 
 
+def _valid_day(day):
+    return date.fromisoformat(day) if valid_date(day) else None
+
+
 def _inside(day, trip, slack=1):
     if not (valid_date(day) and valid_date(trip.get("startDate", "")) and valid_date(trip.get("endDate", ""))):
         return False
@@ -380,7 +384,8 @@ def _inside(day, trip, slack=1):
     return date.fromisoformat(trip["startDate"]) - timedelta(days=slack) <= d <= date.fromisoformat(trip["endDate"]) + timedelta(days=slack)
 
 
-def normalize_segment(raw, trips, matched_trip):
+def normalize_segment(raw, trips, matched_trip, today=None):
+    today = today or date.today()
     problems, flags = [], []
     category = raw.get("category") if raw.get("category") in CATEGORIES else "Other"
     status = raw.get("status") if raw.get("status") in STATUSES else "Needs verification"
@@ -410,8 +415,10 @@ def normalize_segment(raw, trips, matched_trip):
         problems.append("No end / arrival / check-out / return date was read.")
     if raw.get("yearInferred"):
         flags.append("Year was not printed and was inferred.")
-        if not any(_inside(start["date"], t) for t in ([matched_trip] if matched_trip else trips)):
-            problems.append("The inferred year does not place this inside a known trip; confirm the year.")
+        known = any(_inside(start["date"], t) for t in ([matched_trip] if matched_trip else trips))
+        when = _valid_day(start["date"])
+        if not known and when and not today - timedelta(days=14) <= when <= today + timedelta(days=400):
+            problems.append("The inferred year puts this more than two weeks in the past or over a year ahead; confirm the year.")
     if raw.get("timeZoneInferred"):
         flags.append("Time zone derived from the location.")
     confidence = raw.get("confidence") if raw.get("confidence") in ("high", "medium", "low") else "low"
@@ -447,7 +454,7 @@ def _segment_key(seg):
     return (a["category"], a["startDate"], a["startTime"], a["from"].lower(), a["to"].lower(), a["confirmation"].lower())
 
 
-def normalize_result(raw, trips):
+def normalize_result(raw, trips, today=None):
     raw = raw if isinstance(raw, dict) else {}
     trip_raw = raw.get("trip") if isinstance(raw.get("trip"), dict) else {}
     matched_id = _text(trip_raw.get("matchedTripId"), 256)
@@ -456,14 +463,15 @@ def normalize_result(raw, trips):
     for item in (raw.get("segments") or [])[:40]:
         if not isinstance(item, dict):
             continue
-        seg = normalize_segment(item, trips, matched)
+        seg = normalize_segment(item, trips, matched, today)
         key = _segment_key(seg)
         if key in seen:
             continue
         seen.add(key)
         segments.append(seg)
     segments.sort(key=lambda s: s["checks"]["startUtc"] or s["activity"]["startDate"] or "9999")
-    if matched and segments and not all(_inside(s["activity"]["startDate"], matched) for s in segments if s["activity"]["startDate"]):
+    starts = [s["activity"]["startDate"] for s in segments if s["activity"]["startDate"]]
+    if matched and starts and not (all(_inside(d, matched) for d in starts) and any(_inside(d, matched, 0) for d in starts)):
         matched = None
         matched_id = ""
     costs = []
