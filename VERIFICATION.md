@@ -1,5 +1,10 @@
 # Travel Manager NAS — verification and limits
 
+## Travel log, countries, Word (2026-11-09)
+
+- `tests/test_travel_log.py`: day rules (overnight departure day = country left, same-day arrival = destination, hotel nights, trip end without return flight, ticked days win, foreign side trips in the log kept, home pre-fill replaced), report keeps ticked rows and every other workbook part byte-identical, adds new countries to Lists and extends the map range, drops calcChain and recalculates on open; Word .docx paragraphs/tables/headers, DOCTYPE refused, old .doc explained; icon/manifest served without sign-in.
+- Owner's real 2026 log (not committed): ticked days unchanged; totals identical to the workbook's own counts; LibreOffice opened the result and recalculated the Lists counts.
+
 ## v4.1 verification (2026-11-09)
 
 - **Tests:** 89 automated tests (new: `tests/test_sync.py` — sessions across restarts and password changes, 30-day sliding sessions, per-device sign-in limits with forged-header protection, lightweight state, kept originals, missing-original refusal, current backup, stored AI results; installer tests for the ghcr.io image, switch-over from the v4 container, wrong image source, permission repair and `--check` never repairing).

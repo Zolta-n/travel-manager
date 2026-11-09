@@ -164,6 +164,90 @@ def read_email(binary):
     return "\n".join([*headers, "", *(bodies or html_bodies)])[:MAX_TEXT]
 
 
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MAX_DOCX_XML = 20 * 1024 * 1024
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_part(archive, name):
+    try:
+        info = archive.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > MAX_DOCX_XML or (info.compress_size and info.file_size / info.compress_size > 200):
+        raise Failure("This Word file is too large or too compressed to read safely.", "size_limit")
+    with archive.open(info) as source:
+        data = source.read(MAX_DOCX_XML + 1)
+    if len(data) > MAX_DOCX_XML or b"<!DOCTYPE" in data[:4096] or b"<!ENTITY" in data:
+        raise Failure("This Word file contains unsupported XML declarations.", "invalid_docx")
+    from xml.etree import ElementTree
+    try:
+        return ElementTree.fromstring(data)
+    except ElementTree.ParseError as exc:
+        raise Failure("This Word file is damaged and could not be read.", "invalid_docx") from exc
+
+
+def _docx_text(element):
+    """Paragraphs on their own lines; table cells separated by ' | ' so rows stay readable."""
+    lines = []
+
+    def paragraph(p):
+        parts = []
+        for node in p.iter():
+            if node.tag == W + "t" and node.text:
+                parts.append(node.text)
+            elif node.tag == W + "tab":
+                parts.append("\t")
+            elif node.tag in (W + "br", W + "cr"):
+                parts.append("\n")
+        return "".join(parts).strip()
+
+    def walk(parent):
+        for child in parent:
+            if child.tag == W + "p":
+                text = paragraph(child)
+                if text:
+                    lines.append(text)
+            elif child.tag == W + "tbl":
+                for row in child.iter(W + "tr"):
+                    cells = [" ".join(filter(None, (paragraph(p) for p in cell.iter(W + "p")))) for cell in row.findall(W + "tc")]
+                    if any(cells):
+                        lines.append(" | ".join(cells))
+            elif child.tag in (W + "sdt", W + "sdtContent", W + "body", W + "hdr", W + "ftr", W + "customXml"):
+                walk(child)
+    walk(element)
+    return "\n".join(lines)
+
+
+def read_docx(path):
+    import zipfile
+    try:
+        archive = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as exc:
+        raise Failure("This Word file is damaged and could not be read.", "invalid_docx") from exc
+    with archive:
+        names = archive.namelist()
+        if len(names) > 2000:
+            raise Failure("This Word file has too many parts.", "part_limit")
+        body = _docx_part(archive, "word/document.xml")
+        if body is None:
+            raise Failure("This is not a Word .docx document.", "invalid_docx")
+        texts = []
+        for name in sorted(n for n in names if n.startswith("word/header") and n.endswith(".xml"))[:6]:
+            part = _docx_part(archive, name)
+            if part is not None:
+                texts.append(_docx_text(part))
+        texts.append(_docx_text(body.find(W + "body") if body.find(W + "body") is not None else body))
+        for name in sorted(n for n in names if n.startswith("word/footer") and n.endswith(".xml"))[:6]:
+            part = _docx_part(archive, name)
+            if part is not None:
+                texts.append(_docx_text(part))
+    text = "\n".join(t for t in texts if t.strip())
+    if not text.strip():
+        raise Failure("This Word file contains no text. If it only holds a picture of the booking, upload the picture or a PDF instead.", "no_text")
+    return text[:MAX_TEXT]
+
+
 def extract(path, mime, name, cwd):
     deadline = time.monotonic() + 48
     with path.open("rb") as source:
@@ -208,6 +292,10 @@ def extract(path, mime, name, cwd):
             confidences.append(confidence)
         return {"text": "\n\n".join(texts)[:MAX_TEXT], "method": "PDF OCR (pdftoppm + tesseract eng)" if used_ocr else "PDF text (pdftotext)",
                 "confidence": min(confidences) if confidences else 100}
+    if suffix == ".docx" or mime == DOCX_MIME or (first.startswith(b"PK\x03\x04") and suffix in (".docm", ".dotx")):
+        return {"text": read_docx(path), "method": "Word document (Python stdlib)", "confidence": 100}
+    if first.startswith(b"\xd0\xcf\x11\xe0") or suffix == ".doc":
+        raise Failure("Old Word .doc files cannot be read automatically. In Word choose File → Save as → Word Document (.docx) or PDF, then upload that.", "unsupported_type")
     if mime == "message/rfc822" or suffix == ".eml":
         return {"text": read_email(path.read_bytes()), "method": "Email (Python stdlib MIME)", "confidence": 100}
     if mime.startswith("text/") or suffix in (".txt", ".csv", ".ics", ".html", ".htm"):
@@ -218,7 +306,7 @@ def extract(path, mime, name, cwd):
     if mime.startswith("image/") or suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"):
         text, confidence = ocr(path, cwd, deadline)
         return {"text": text, "method": "Image OCR (tesseract eng)", "confidence": confidence}
-    raise Failure("This format is kept intact but is not supported for automatic reading. Use PDF, a single-page image, EML or text.", "unsupported_type")
+    raise Failure("This format is kept intact but is not supported for automatic reading. Use PDF, Word (.docx), a single-page image, EML or text.", "unsupported_type")
 
 
 AI_IMAGE_EDGE = 2600
