@@ -49,3 +49,4 @@ Zoltan. Non-developer for this project: prefers DSM GUI steps (Task Scheduler, F
 
 ## Next upgrade (planned)
 - **Bookings by email:** forward confirmations to `travel@businessintels.com`; Cloudflare Email Routing + Email Worker push the raw email to `POST /api/inbound`; the app reads the body and all attachments. Full spec: `docs/NEXT_UPGRADE_inbound_email.md`.
+- **Optional calendar invites:** send a trip as an Outlook invite to the work email, through the same Worker (Part 3 of the spec).
