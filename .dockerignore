@@ -6,6 +6,7 @@
 !ai_reader.py
 !app.py
 !travel_log.py
+!inbound.py
 !store.py
 !extractor.py
 !reader_worker.py
