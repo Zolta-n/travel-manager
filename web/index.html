@@ -473,7 +473,7 @@ function bindCountries() {
 
 /* ============================================================ rendering */
 function show(v) {
-  view = v; $$('.view').forEach(e => e.hidden = e.id !== v); if (v === 'countries') { renderCountries(); loadCountries() } if (v === 'documents') { loadInbound(); loadCalendar() } $$('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  view = v; $$('.view').forEach(e => e.hidden = e.id !== v); if (v === 'countries') { renderCountries(); loadCountries() } if (v === 'documents') { loadInbound(); loadInviteSettings() } $$('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const words = {countries: ['Where you have been.', 'Days per country, on a map, and your Excel travel log.'], calendar: ['Your travel calendar.', 'Every trip at a glance — business and private days in colour.'], trips: ['Less admin. More arrival.', 'A calm desk for every part of the journey.'], itinerary: ['Every detail. One itinerary.', 'Edit the journey, not just the notes.'], documents: ['One place for the originals.', 'Tickets, stays, rentals, confirmations and invoices.'], costs: ['Clear costs. Real evidence.', 'Estimates and invoices remain separate.'], data: ['Familiar data. Safer copies.', 'Excel for your records. Backups for your originals.'], help: ['Ready when you are.', 'A practical private travel desk, with clear boundaries.']};
   $('#heading').textContent = words[v][0]; $('#subheading').textContent = words[v][1];
 }
@@ -1042,13 +1042,13 @@ async function newInboundKey() {
   catch (e) { toast(e.message) }
 }
 /* ---------- work-calendar invites (settings on the NAS; Cloudflare collects and sends them) */
-let calendarInfo = null;
-async function loadCalendar() {
+let inviteInfo = null;
+async function loadInviteSettings() {
   if (!nas.authenticated) return;
-  try { calendarInfo = await nasApi('/api/calendar/settings'); renderCalendar() } catch (e) { $('#calendarState').textContent = 'Unavailable'; $('#calendarNote').textContent = e.message }
+  try { inviteInfo = await nasApi('/api/calendar/settings'); renderInviteSettings() } catch (e) { $('#calendarState').textContent = 'Unavailable'; $('#calendarNote').textContent = e.message }
 }
-function renderCalendar() {
-  const c = calendarInfo; if (!c) return;
+function renderInviteSettings() {
+  const c = inviteInfo; if (!c) return;
   $('#calendarState').textContent = c.enabled ? 'On' : 'Off'; $('#calendarState').className = 'pill ' + (c.enabled ? '' : 'warn');
   $('#calendarEnabled').checked = c.enabled;
   for (const [id, key] of [['#calendarTo', 'to'], ['#calendarFrom', 'from']]) if (document.activeElement !== $(id)) $(id).value = c[key];
@@ -1058,10 +1058,10 @@ function renderCalendar() {
   const label = {sent: 'Sent', cancelled: 'Cancelled', new: 'Waiting'};
   $('#calendarRecent').innerHTML = c.recent.length ? '<h3 style="margin-block:12px 4px">Recent invites</h3><ul>' + c.recent.map(r => `<li>${r.sentAt ? esc(new Date(r.sentAt * 1000).toLocaleString('en-GB', {dateStyle: 'medium', timeStyle: 'short'})) + ' · ' : ''}<b>${esc(r.error ? 'Not sent' : r.waiting && r.status !== 'new' ? 'Update waiting' : label[r.status] || r.status)}</b>${r.summary ? ' · ' + esc(r.summary) : ''}${r.error ? ' · ' + esc(r.error) : ''}</li>`).join('') + '</ul>' : '';
 }
-async function saveCalendar() {
+async function saveInviteSettings() {
   try {
-    calendarInfo = await nasApi('/api/calendar/settings', {method: 'POST', body: JSON.stringify({enabled: $('#calendarEnabled').checked, to: $('#calendarTo').value.trim(), from: $('#calendarFrom').value.trim()})});
-    renderCalendar(); toast(calendarInfo.enabled ? 'Work calendar invites are on. The first ones go out within about 6 minutes.' : 'Saved. Invites are off.');
+    inviteInfo = await nasApi('/api/calendar/settings', {method: 'POST', body: JSON.stringify({enabled: $('#calendarEnabled').checked, to: $('#calendarTo').value.trim(), from: $('#calendarFrom').value.trim()})});
+    renderInviteSettings(); toast(inviteInfo.enabled ? 'Work calendar invites are on. The first ones go out within about 6 minutes.' : 'Saved. Invites are off.');
   } catch (e) { toast(e.message) }
 }
 function openMemo() {
@@ -1410,7 +1410,7 @@ function bindEvents() {
   $('#dateOrder').addEventListener('change', e => { state.settings.dateOrder = e.target.value; markDirty(); toast('Date interpretation updated for the local reader. Retry documents with ambiguous numeric dates.') });
   $('#homeZone').addEventListener('change', e => { const z = e.target.value.trim(); if (!validZone(z)) { toast('Use an IANA time zone such as Asia/Shanghai.'); e.target.value = setting('homeZone'); return } state.settings.homeZone = z; markDirty() });
   $('#processExisting').addEventListener('click', processExisting);
-  $('#openMemo').addEventListener('click', openMemo); $('#saveInbound').addEventListener('click', saveInbound); $('#saveCalendar').addEventListener('click', saveCalendar); $('#newInboundKey').addEventListener('click', newInboundKey);
+  $('#openMemo').addEventListener('click', openMemo); $('#saveInbound').addEventListener('click', saveInbound); $('#saveCalendar').addEventListener('click', saveInviteSettings); $('#newInboundKey').addEventListener('click', newInboundKey);
   $('#copyInboundKey').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#inboundKeyValue').value); toast('Key copied.') } catch { $('#inboundKeyValue').select(); toast('Select the key and copy it.') } }); $('#saveMemo').addEventListener('click', saveMemo); $('#stopReading').addEventListener('click', stopReading);
   $('#checkReaders').addEventListener('click', async () => { const h = await refreshReaders(); readingStatus('NAS readers: ' + Object.entries(h).filter(([k]) => k !== 'ai').map(([k, v]) => k + ': ' + (typeof v === 'boolean' ? (v ? 'ready' : 'missing') : String(v))).join(' · ') + ' · AI: ' + (h.ai?.enabled ? 'Claude ' + h.ai.model : 'not configured')) });
   $('#serverHistoryBackup').addEventListener('click', () => { const a = document.createElement('a'); a.href = '/api/backup'; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); toast('Server history backup download requested. It contains all retained revisions and originals; store it privately.') });
