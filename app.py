@@ -16,10 +16,11 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
 
-from ai_reader import AIConfig, AIError, JobBoard, build_content, build_context, build_request, call_claude, normalize_result
+from ai_reader import AIConfig, AIError, EMAIL_NOTE, JobBoard, build_content, build_context, build_email_content, build_request, call_claude, normalize_result
 import base64
 import travel_log
-from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate
+from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate, split_email
+from inbound import Inbound, InboundError
 from store import Conflict, StateError, Store
 
 MAX_REQUEST_BYTES = 60 * 1024 * 1024
@@ -112,6 +113,7 @@ class Application:
         self.ai = config.ai or AIConfig(api_key="")
         self.jobs = JobBoard()
         self.log_cache = {}
+        self.inbound = Inbound(self)
 
     def _load_password(self, password):
         """Sessions survive restarts; only a changed password signs every device out."""
@@ -200,6 +202,9 @@ class Application:
             status, body = self.error_body(400, str(exc), "invalid_state")
         except (ReaderError, AIError) as exc:
             status, body = self.error_body(exc.status, str(exc), exc.code)
+        except InboundError as exc:
+            environ["travel.note"] = environ.get("travel.note") or exc.code
+            status, body = self.error_body(exc.status, exc.message, exc.code)
         except APIError as exc:
             environ["travel.note"] = environ.get("travel.note") or exc.code
             status, body = self.error_body(exc.status, exc.message, exc.code, exc.extra)
@@ -364,13 +369,18 @@ class Application:
             ("GET", "/api/backup"): self.backup,
             ("POST", "/api/travel-log"): self.travel_log_report,
             ("GET", "/api/countries"): self.countries,
+            ("POST", "/api/inbound"): self.inbound_mail,
+            ("GET", "/api/inbound/settings"): self.inbound_settings,
+            ("POST", "/api/inbound/settings"): self.save_inbound_settings,
+            ("POST", "/api/inbound/key"): self.inbound_key,
             ("GET", "/manifest.json"): self.static, ("GET", "/apple-touch-icon.png"): self.static,
             ("GET", "/icon-192.png"): self.static, ("GET", "/icon-512.png"): self.static,
         }
 
     def dispatch(self, env):
         method, path = env.get("REQUEST_METHOD", "GET"), env.get("PATH_INFO", "/")
-        self.check_host_origin(env, require_origin=method in ("POST", "PUT", "PATCH", "DELETE"))
+        # The Cloudflare Email Worker is not a browser: it sends no Origin and signs in with its own key.
+        self.check_host_origin(env, require_origin=method in ("POST", "PUT", "PATCH", "DELETE") and path != "/api/inbound")
         routes = self.routes()
         handler = routes.get((method, path))
         if handler:
@@ -506,7 +516,7 @@ class Application:
         env["travel.note"] = "AI reading queued"
 
         def work():
-            result = self.analyze(path, mime, name)
+            result = self.analyze(path, mime, name, identifier)
             result["created"] = time.time()
             self.store.save_ai_result(identifier, Path(path).parent.name + Path(path).name, result, result["created"])
             LOGGER.info("AI reading finished: %d segment(s), %s", len(result["segments"]), result.get("method", ""))
@@ -591,7 +601,88 @@ class Application:
         finally:
             self.readers.release()
 
-    def analyze(self, path, mime, name):
+    # ------------------------------------------------------------ bookings by email
+
+    def inbound_mail(self, env):
+        result = self.inbound.receive(env)
+        env["travel.note"] = "email duplicate ignored" if result["duplicate"] else "email accepted"
+        return 202, result, [], False
+
+    def inbound_settings(self, env):
+        self.require_auth(env)
+        return self.ok(self.inbound.settings())
+
+    def save_inbound_settings(self, env):
+        self.require_auth(env, csrf=True)
+        return self.ok(self.inbound.save_settings(self.read_json(env, 16384)))
+
+    def inbound_key(self, env):
+        self.require_auth(env, csrf=True)
+        env["travel.note"] = "new email key created"
+        return self.ok(self.inbound.new_key())
+
+    def _attachment_blocks(self, item):
+        """Claude blocks for one email attachment {name, mime, kind, data}."""
+        name, kind, data = item["name"], item.get("kind") or "", item["data"]
+        if kind == "pdf":
+            return build_content(data, "application/pdf", name)
+        temp = self.work_dir / ("attachment-" + secrets.token_hex(8) + Path(name).suffix.lower()[:8])
+        temp.write_bytes(data)
+        try:
+            if kind == "image":
+                image = self._with_reader(lambda: prepare_ai_image(temp, item["mime"], name, self.work_dir))
+                return build_content(data, item["mime"], name, image=image)
+            text = self._with_reader(lambda: extract_document(temp, item["mime"], name, self.work_dir))["text"]
+            return build_content(data, "text/plain", name, text=text)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def analyze_email(self, text, attachments, name):
+        """One Claude call for an email: its text plus all readable attachments together."""
+        parts, skipped = [], []
+        for item in attachments:
+            try:
+                parts.append((item["name"], self._attachment_blocks(item)))
+            except (AIError, ReaderError) as exc:
+                if getattr(exc, "code", "") == "reader_busy":
+                    raise
+                skipped.append((item["name"], str(exc)))
+        content, over = build_email_content(text, parts)
+        skipped += over
+        state = self.store.metadata()
+        raw, usage = call_claude(build_request(content, build_context(state), name, self.ai.model, note=EMAIL_NOTE), self.ai)
+        result = normalize_result(raw, state.get("trips", []))
+        result["warnings"] = [*result["warnings"], *("Attachment not read: %s (%s)" % s for s in skipped)][:20]
+        result.update(method="Email + %d attachment(s) read by Claude (%s)" % (len(parts), usage["model"]), usage=usage,
+                      sourceText=text[:20000], processedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        return result
+
+    @staticmethod
+    def _kind(mime, name):
+        suffix = Path(name or "").suffix.lower()
+        if mime == "application/pdf" or suffix == ".pdf":
+            return "pdf"
+        if (mime or "").startswith("image/"):
+            return "image"
+        if suffix == ".docx" or "wordprocessingml" in (mime or ""):
+            return "docx"
+        return "text"
+
+    def analyze(self, path, mime, name, identifier=None):
+        if mime == "message/rfc822" or Path(name or "").suffix.lower() == ".eml":
+            # An email is read with its attachments: those inside the file, plus those the email
+            # import stored as separate documents (sourceEmail = this document).
+            split = self._with_reader(lambda: split_email(path, self.work_dir))
+            attachments = list(split["attachments"])
+            if identifier:
+                for document in self.store.metadata().get("documents", []):
+                    if document.get("sourceEmail") == identifier:
+                        try:
+                            data, child_mime, child_name = self.store.original(document["documentId"])
+                        except (KeyError, StateError, OSError):
+                            continue
+                        attachments.append({"name": child_name, "mime": child_mime, "kind": self._kind(child_mime, child_name), "data": data})
+            return self.analyze_email(split["text"], attachments, name)
         binary = Path(path).read_bytes()
         source_text, method = "", "PDF read by Claude"
         if is_pdf(path, mime, name):

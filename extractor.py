@@ -95,6 +95,23 @@ def prepare_ai_image(path, mime, name, work_root):
     return _run_worker(path, mime, name, work_root, "--ai-image", collect=collect)
 
 
+def split_email(path, work_root):
+    """Split an email in the sandboxed worker. Returns the worker result with each
+    attachment's bytes under "data" (files are read before the job folder is removed)."""
+    def collect(job_root, result):
+        def read(name):
+            target = job_root / str(name)
+            if target.parent != job_root or not target.is_file():
+                raise ReaderError("The email could not be split safely.", "invalid_email")
+            return target.read_bytes()
+        attachments = result.get("attachments") if isinstance(result.get("attachments"), list) else []
+        return {"text": str(result.get("text") or ""), "subject": str(result.get("subject") or "Email"),
+                "email": read(result.get("email")), "skipped": result.get("skipped") or [],
+                "attachments": [{**{k: a.get(k) for k in ("name", "mime", "kind", "size")}, "data": read(a.get("file"))}
+                                for a in attachments if isinstance(a, dict)]}
+    return _run_worker(path, "message/rfc822", "email.eml", work_root, "--split-email", collect=collect)
+
+
 class ReaderGate:
     def __init__(self):
         self.lock = threading.BoundedSemaphore(1)

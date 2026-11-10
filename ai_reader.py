@@ -207,8 +207,32 @@ def build_context(state, today=None):
     return {"today": (today or date.today()).isoformat(), "homeZone": home, "trips": trips, "memo": memo.strip()[-8000:]}
 
 
-def build_request(content, context, name, model):
-    instruction = ("Extract the itinerary from the document above.\n"
+EMAIL_NOTE = ("These parts are ONE email: the email text and its attachments. They usually describe the same bookings "
+              "(e.g. the text gives the booking reference, the PDF gives the times). Combine them into one result with one "
+              "segment per booking leg; never list the same leg twice because it appears in more than one part.")
+
+
+def build_email_content(text, parts, budget=24 * 1024 * 1024):
+    """Claude content for one email: its text plus readable attachments, each already prepared as
+    (name, kind, blocks). Returns (content, skipped) where skipped lists (name, reason) over the size budget."""
+    content, skipped, used = [], [], 0
+    if text.strip():
+        content.append({"type": "text", "text": "Email text\n----- EMAIL START -----\n" + text[:MAX_TEXT_CHARS] + "\n----- EMAIL END -----"})
+    for name, blocks in parts:
+        size = sum(len(b.get("source", {}).get("data", "")) + len(b.get("text", "")) for b in blocks)
+        if used + size > budget:
+            skipped.append((name, "too large to read together with the email"))
+            continue
+        used += size
+        content.append({"type": "text", "text": "Attachment: " + name})
+        content.extend(blocks)
+    if not content:
+        raise AIError("The email contains no readable text or attachments.", "no_text", 422)
+    return content, skipped
+
+
+def build_request(content, context, name, model, note=""):
+    instruction = ((note + "\n") if note else "") + ("Extract the itinerary from the document above.\n"
                    "Document filename: " + (name or "unknown") + "\n"
                    "Today's date: " + context["today"] + "\n"
                    "Traveller's home time zone: " + context["homeZone"] + "\n"
