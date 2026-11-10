@@ -21,13 +21,14 @@ import base64
 import travel_log
 from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate, split_email
 from inbound import Inbound, InboundError
+from calendar_invites import Calendar, CalendarError
 from store import Conflict, StateError, Store
 
 MAX_REQUEST_BYTES = 60 * 1024 * 1024
 SESSION_SECONDS = 30 * 24 * 60 * 60  # sliding: renewed (at most daily) while a device keeps using the app
 SESSION_RENEW_AFTER = 24 * 60 * 60
 LOGIN_WINDOW, LOGIN_PER_DEVICE, LOGIN_TOTAL = 600, 5, 60
-QUIET_PATHS = ("/api/revision", "/api/session", "/api/analysis", "/api/analyze/")
+QUIET_PATHS = ("/api/revision", "/api/session", "/api/analysis", "/api/analyze/", "/api/outbox")
 LOGGER = logging.getLogger("travel_manager")
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; "
@@ -114,6 +115,7 @@ class Application:
         self.jobs = JobBoard()
         self.log_cache = {}
         self.inbound = Inbound(self)
+        self.calendar = Calendar(self.store)
 
     def _load_password(self, password):
         """Sessions survive restarts; only a changed password signs every device out."""
@@ -202,6 +204,9 @@ class Application:
             status, body = self.error_body(400, str(exc), "invalid_state")
         except (ReaderError, AIError) as exc:
             status, body = self.error_body(exc.status, str(exc), exc.code)
+        except CalendarError as exc:
+            environ["travel.note"] = environ.get("travel.note") or exc.code
+            status, body = self.error_body(exc.status, exc.message, exc.code)
         except InboundError as exc:
             environ["travel.note"] = environ.get("travel.note") or exc.code
             status, body = self.error_body(exc.status, exc.message, exc.code)
@@ -373,6 +378,10 @@ class Application:
             ("GET", "/api/inbound/settings"): self.inbound_settings,
             ("POST", "/api/inbound/settings"): self.save_inbound_settings,
             ("POST", "/api/inbound/key"): self.inbound_key,
+            ("GET", "/api/outbox"): self.get_outbox,
+            ("POST", "/api/outbox"): self.ack_outbox,
+            ("GET", "/api/calendar/settings"): self.calendar_settings,
+            ("POST", "/api/calendar/settings"): self.save_calendar_settings,
             ("GET", "/manifest.json"): self.static, ("GET", "/apple-touch-icon.png"): self.static,
             ("GET", "/icon-192.png"): self.static, ("GET", "/icon-512.png"): self.static,
         }
@@ -380,7 +389,7 @@ class Application:
     def dispatch(self, env):
         method, path = env.get("REQUEST_METHOD", "GET"), env.get("PATH_INFO", "/")
         # The Cloudflare Email Worker is not a browser: it sends no Origin and signs in with its own key.
-        self.check_host_origin(env, require_origin=method in ("POST", "PUT", "PATCH", "DELETE") and path != "/api/inbound")
+        self.check_host_origin(env, require_origin=method in ("POST", "PUT", "PATCH", "DELETE") and path not in ("/api/inbound", "/api/outbox"))
         routes = self.routes()
         handler = routes.get((method, path))
         if handler:
@@ -620,6 +629,33 @@ class Application:
         self.require_auth(env, csrf=True)
         env["travel.note"] = "new email key created"
         return self.ok(self.inbound.new_key())
+
+    # ------------------------------------------------------------ work-calendar invites
+
+    def get_outbox(self, env):
+        """Polled by the Cloudflare Worker (same key as the inbound email)."""
+        self.inbound.check_key(env)
+        messages = self.calendar.outbox()
+        if messages:
+            env["travel.note"] = "%d invite(s) handed to Cloudflare" % len(messages)
+        return self.ok({"messages": messages})
+
+    def ack_outbox(self, env):
+        self.inbound.check_key(env)
+        payload = self.read_json(env, 65536)
+        if set(payload) != {"results"}:
+            raise APIError(400, "Supply results.")
+        result = self.calendar.acknowledge(payload["results"])
+        env["travel.note"] = "%d invite result(s)" % len(payload["results"]) if isinstance(payload["results"], list) else ""
+        return self.ok(result)
+
+    def calendar_settings(self, env):
+        self.require_auth(env)
+        return self.ok(self.calendar.settings())
+
+    def save_calendar_settings(self, env):
+        self.require_auth(env, csrf=True)
+        return self.ok(self.calendar.save_settings(self.read_json(env, 4096)))
 
     def _attachment_blocks(self, item):
         """Claude blocks for one email attachment {name, mime, kind, data}."""
