@@ -95,7 +95,7 @@ If a login fails repeatedly, wait 10 minutes. The server limits sign-ins, and re
 Three distinct backup choices:
 
 1. **Current-state backup (browser):** the frontend's current-state backup action downloads a migratable v2/v3 travel-state snapshot with **current** records and their originals. Its existing restore/import UI can bring that current state back. It does **not** include previously deleted records, server revision history or server sessions. Save this before a bulk import or change.
-2. **Download server history backup:** this separate frontend action fetches the authenticated `/api/backup` endpoint. It exports the current full state **and every historical revision with originals**, not sessions/passwords. This is **not** the current-state backup button and has **no automatic history-restore UI**. Keep the downloaded JSON private; it can grow large. The database is held at a consistent revision boundary while the export streams.
+2. **Download server history backup:** this separate frontend action fetches the authenticated `/api/backup` endpoint. It exports the current full state **and every historical revision**; each original file is included once (format v2: history states refer to files by `hash`, files used only by older revisions are in `originals`), not sessions/passwords. This is **not** the current-state backup button and has **no automatic history-restore UI**. Keep the downloaded JSON private; it can grow large. The database is held at a consistent revision boundary while the export streams.
 3. **Stopped-container folder backup:** in Container Manager stop the normal project, wait for its server to exit, then copy the **entire `data` directory** somewhere private with File Station/your NAS backup tool. Include `travel.sqlite3`, any `-wal`/`-shm` sidecars and the entire `originals` tree. Do not copy only the SQLite file from a running container. Restart after the copy completes.
 
 Keep a separate private copy of your project configuration and `.env` (in a password-manager/encrypted backup), not just the data. The seed is not a current backup. Never delete the database to “refresh” the app: that would cause a fresh initial import.
@@ -104,7 +104,7 @@ To update: take a backup first, stop the project, replace the source/frontend fi
 
 ## Reader and storage boundaries
 
-- Files: **12 MiB each**; originals in the current state: **40 MiB total**. History is retained separately and can exceed that total.
+- Files: **12 MiB each**; originals in the current state: **250 MiB total** (larger saves upload in batches). History is retained separately and can exceed that total.
 - Whole-state HTTP request: 60 MiB; metadata: 4 MiB; at most 10,000 rows per collection.
 - Offline readers: Python text/EML parsing; Poppler PDF text; Poppler rasterization plus Tesseract **English** OCR for scanned/hybrid PDFs; Tesseract English OCR for images. Linux reader packages are installed at image build, not fetched from a CDN at runtime.
 - Maximum 20 PDF pages; encrypted PDFs stop and require a trusted local unlocked copy. Images: 20 million pixels / 12,000-pixel longest edge, one frame only. Each local read is bounded to approximately 55 seconds, one at a time, with memory/file limits.

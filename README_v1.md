@@ -38,7 +38,7 @@ All JSON responses/errors and frontend responses have `Cache-Control: no-store`.
 | `PUT /api/state` | Session + `X-CSRF-Token` + Origin | Request `{state,revision}`; response `{revision}` |
 | `POST /api/read` | Session + `X-CSRF-Token` + Origin | Request `{documentId}`; response `{text,method,confidence}`; optional `truncated:true,warning` |
 | `GET /api/readers` | Session | Simple health dictionary: `text_email`, `pdfinfo`, `pdf_text`, `pdf_raster`, `image_ocr`, `pillow`, `ocr_language`, `offline`, `max_pages` |
-| `GET /api/backup` | Session | Streamed consistent JSON with current `state`, `revision`, `format`, `exportedAt`, and `history:[{revision,createdAt,state},…]`; **all history originals included** |
+| `GET /api/backup` | Session | Streamed consistent JSON with current `state`, `revision`, `format`, `exportedAt`, and `history:[{revision,createdAt,state},…]` (format v2: history documents carry `hash`; files used only by older revisions are in `originals:{sha256: data URI}`; each file appears once) |
 
 A stale PUT returns **409** `{error,code:"revision_conflict",revision:currentRevision}` without changing current data. The client must reload/reconcile; retrying the same stale body is not a merge. Other errors are JSON `{error,code}` with 400/401/403/404/405/411/413/415/422/429/500/503 as appropriate. Read processing changes **no saved metadata or revision**: the frontend saves extracted results and accepted itinerary changes with its next state PUT.
 
@@ -56,7 +56,7 @@ The **Download server history backup** action is not a public download link: it 
 - Login attempts are reserved transactionally before password hashing: five per source IP in ten minutes, fifty globally. The reverse proxy's source IP is deliberately used instead of blindly trusting forwarded addresses, so users behind that proxy share a rate bucket.
 - Exact mandatory `TRAVEL_ALLOWED_HOSTS`, including non-default ports. No wildcard or Host inference. Missing/malformed/disallowed hosts fail. Mutating requests need explicit same-origin Origin and CSRF (except login, which instead has Origin/rate checks). Browsers' cross-site fetch metadata is rejected.
 - Security headers: restrictive self-only CSP (inline script/style needed by the standalone frontend), no external reader/CDN script sources, nosniff, frame denial, no-referrer, same-origin resource policy, restricted permissions policy and HSTS in secure mode. No CORS headers. No untrusted forwarded headers.
-- 60 MiB request limit; login 8 KiB, reader request 4 KiB; current originals 40 MiB, each 12 MiB, metadata 4 MiB. Python dependencies are exact-version pinned. Base-image and OS package security updates still require deliberate rebuilds/testing.
+- 60 MiB request limit; login 8 KiB, reader request 4 KiB; current originals 250 MiB, each 12 MiB, metadata 4 MiB. Python dependencies are exact-version pinned. Base-image and OS package security updates still require deliberate rebuilds/testing.
 - Normal container: UID/GID 10001, read-only root filesystem, all capabilities dropped, no-new-privileges, process/memory limits, bounded scratch tmpfs, persistent private data bind, no Docker socket, loopback-only published port. The optional one-time GUI helper runs separately with only narrowly required ownership capabilities against a **fresh app data directory**; it is not part of the normal service.
 
 ## Offline extraction and limits

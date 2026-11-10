@@ -98,7 +98,10 @@ class StoreTests(WorkspaceCase):
         self.assertTrue(path.exists())
         backup = json.loads("".join(reopened.backup_chunks()))
         self.assertEqual(len(backup["history"]), 2)
-        self.assertEqual(backup["history"][0]["state"]["documents"][0]["data"], document()["data"])
+        # v2: history refers to files by hash; files only older revisions use are listed once.
+        old = backup["history"][0]["state"]["documents"][0]
+        self.assertNotIn("data", old)
+        self.assertEqual(backup["originals"][old["hash"]], document()["data"])
         self.assertEqual(backup["revision"], 1)
 
     def test_revision_conflict_and_concurrent_writers(self):
@@ -278,7 +281,7 @@ class HTTPTests(WorkspaceCase):
         self.assertEqual(status, 200)
         self.assertIn("attachment", headers["Content-Disposition"])
         self.assertEqual(backup["state"]["documents"], [])
-        self.assertEqual(backup["history"][1]["state"]["documents"][0]["data"], doc["data"])
+        self.assertEqual(backup["originals"][backup["history"][1]["state"]["documents"][0]["hash"]], doc["data"])
 
     def test_public_route_never_serves_private_files(self):
         status, headers, body = self.request("GET", "/")
@@ -481,3 +484,43 @@ class FlaskClientTests(WorkspaceCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class StorageAndBackupTests(WorkspaceCase):
+    def test_limit_is_250_mb(self):
+        from store import MAX_CURRENT_BYTES, prepare_state
+        self.assertEqual(MAX_CURRENT_BYTES, 250 * 1024 * 1024)
+        with self.assertRaises(StateError) as failure:
+            prepare_state(state_with(document(b"x" * 3000)), max_current=2000)
+        self.assertIn("MB limit", str(failure.exception))
+
+    def test_history_backup_holds_each_file_once(self):
+        store = Store(self.work / "data")
+        kept, dropped = document(b"kept ticket", "keep"), document(b"old voucher", "old")
+        store.put(state_with(kept, dropped), 0)
+        current = store.get(originals=False)["state"]
+        for revision in range(1, 5):  # several saves that keep the same files
+            current["trips"] = [{"tripId": "t%d" % revision, "name": "Trip <%d>" % revision}]
+            store.put(current, revision)
+        current["documents"] = [d for d in current["documents"] if d["documentId"] == "keep"]
+        store.put(current, 5)
+        raw = "".join(store.backup_chunks())
+        backup = json.loads(raw)
+        self.assertEqual(backup["format"], "travel-manager-nas-backup-v2")
+        self.assertEqual(raw.count(kept["data"].split(",", 1)[1]), 1)     # current file: inline in "state" only
+        self.assertEqual(raw.count(dropped["data"].split(",", 1)[1]), 1)  # deleted file: once, in "originals"
+        self.assertEqual(backup["state"]["documents"][0]["data"], kept["data"])
+        self.assertEqual(list(backup["originals"].values()), [dropped["data"]])
+        self.assertNotIn("<", raw)
+
+    def test_current_backup_is_complete_and_importable(self):
+        store = Store(self.work / "data")
+        store.put(state_with(document(b"ticket one", "a"), {**document(b"", "b"), "data": "", "size": 0}), 0)
+        backup = json.loads("".join(store.current_backup_chunks()))
+        self.assertEqual(backup["version"], 2)
+        self.assertEqual([d["data"] for d in backup["documents"]], [document(b"ticket one", "a")["data"], ""])
+        self.assertTrue(all("stored" not in d for d in backup["documents"]))
+        # Importing it into a fresh NAS works as before.
+        fresh = Store(self.work / "fresh")
+        fresh.put(backup, 0)
+        self.assertEqual(fresh.get()["state"]["documents"][0]["data"], document(b"ticket one", "a")["data"])
