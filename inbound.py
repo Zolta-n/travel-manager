@@ -278,7 +278,7 @@ class Inbound:
                      "auto": {"state": "Already linked", "reason": "Read together with the email “" + split["subject"] + "”."}}
             if len(item["data"]) > budget:
                 child.pop("data")
-                child.update(size=len(item["data"]), notes="Not stored: the NAS storage limit (40 MB of originals) is reached.")
+                child.update(size=len(item["data"]), notes="Not stored: the NAS storage limit for documents is reached.")
                 not_stored.append(item["name"])
             else:
                 budget -= len(item["data"])

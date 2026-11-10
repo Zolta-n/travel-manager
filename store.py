@@ -15,7 +15,9 @@ import uuid
 from contextlib import contextmanager
 
 MAX_FILE_BYTES = 12 * 1024 * 1024
-MAX_CURRENT_BYTES = 40 * 1024 * 1024
+# Originals of the current documents. A backup of this much (base64) must still fit a browser's
+# string limit (~512 MB) so it can be restored through the app.
+MAX_CURRENT_BYTES = 250 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 DATA_URI = re.compile(r"data:([a-zA-Z0-9.+/-]*);base64,([A-Za-z0-9+/]*={0,2})\Z")
 COLLECTIONS = {"trips": "tripId", "activities": "activityId", "documents": "documentId", "expenses": "expenseId"}
@@ -122,7 +124,7 @@ def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES,
                         raise StateError("Original exceeds the 12 MiB per-file limit.")
                     total += len(binary)
                     if total > max_current:
-                        raise StateError("Current originals exceed the 40 MiB limit.")
+                        raise StateError("Current originals exceed the %d MB limit." % (max_current // 1048576))
                     mime = match[1].lower() or "application/octet-stream"
                     digest = hashlib.sha256(binary).hexdigest()
                     document.update(size=len(binary), mime=mime, hash=digest)
@@ -132,7 +134,7 @@ def prepare_state(state, max_file=MAX_FILE_BYTES, max_current=MAX_CURRENT_BYTES,
                     mime = document.get("mime") if isinstance(document.get("mime"), str) and re.fullmatch(r"[a-zA-Z0-9.+/-]{1,100}", document.get("mime", "")) else "application/octet-stream"
                     total += known[digest]
                     if total > max_current:
-                        raise StateError("Current originals exceed the 40 MiB limit.")
+                        raise StateError("Current originals exceed the %d MB limit." % (max_current // 1048576))
                     document.update(size=known[digest], mime=mime.lower())
                     originals.append((identifier, digest, mime.lower(), None))
                 else:
@@ -360,27 +362,56 @@ class Store:
                 raise OSError("Stored original failed its integrity check.")
             return path, ref["mime"], document.get("name", "")
 
+    def _data_uri(self, digest, mime):
+        binary = self.original_path(digest).read_bytes()
+        if hashlib.sha256(binary).hexdigest() != digest:
+            raise OSError("Stored original failed its integrity check.")
+        return "data:" + mime + ";base64," + base64.b64encode(binary).decode("ascii")
+
+    def _stream_state(self, db, row):
+        """A state as JSON with its files inline, one document at a time, so memory stays at one file."""
+        state = self._reconstruct(db, row, originals=False)
+        documents = state.pop("documents")
+        head = json.dumps(state, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
+        yield head[:-1] + ',"documents":['
+        for index, document in enumerate(documents):
+            if document.pop("stored", False):
+                document["data"] = self._data_uri(document["hash"], document["mime"])
+            yield ("," if index else "") + json.dumps(document, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
+        yield "]}"
+
     def current_backup_chunks(self):
         """Current state only, with originals - restorable through the app."""
         with self.connect() as db:
             db.execute("BEGIN")
             latest = db.execute("SELECT * FROM snapshots ORDER BY revision DESC LIMIT 1").fetchone()
-            state = self._reconstruct(db, latest)
-        yield json.dumps(state, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
+            yield from self._stream_state(db, latest)
 
     def backup_chunks(self):
         # One read transaction fixes the revision boundary; originals are immutable.
         with self.connect() as db:
             db.execute("BEGIN")
             latest = db.execute("SELECT * FROM snapshots ORDER BY revision DESC LIMIT 1").fetchone()
-            yield '{"format":"travel-manager-nas-backup-v1","exportedAt":' + json.dumps(time.time())
+            # v2: every file appears once. "state" has the current files inline (restorable through the app);
+            # history states refer to files by "hash"; files only older revisions use are in "originals".
+            yield '{"format":"travel-manager-nas-backup-v2","exportedAt":' + json.dumps(time.time())
             yield ',"revision":' + str(latest["revision"]) + ',"state":'
-            yield json.dumps(self._reconstruct(db, latest), ensure_ascii=True, allow_nan=False)
+            yield from self._stream_state(db, latest)
+            current = {r["sha256"] for r in db.execute("SELECT sha256 FROM snapshot_originals WHERE revision=?", (latest["revision"],))}
             yield ',"history":['
             first = True
             for row in db.execute("SELECT * FROM snapshots WHERE revision<=? ORDER BY revision", (latest["revision"],)):
                 if not first:
                     yield ","
                 first = False
-                yield json.dumps({"revision": row["revision"], "createdAt": row["created_at"], "state": self._reconstruct(db, row)}, ensure_ascii=True, allow_nan=False)
-            yield "]}"
+                yield json.dumps({"revision": row["revision"], "createdAt": row["created_at"], "state": self._reconstruct(db, row, originals=False)},
+                                 ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
+            yield '],"originals":{'
+            older = db.execute("SELECT DISTINCT sha256, mime FROM snapshot_originals WHERE revision<=? ORDER BY sha256", (latest["revision"],)).fetchall()
+            first = True
+            for ref in older:
+                if ref["sha256"] in current:
+                    continue
+                yield ("" if first else ",") + json.dumps(ref["sha256"]) + ":" + json.dumps(self._data_uri(ref["sha256"], ref["mime"]))
+                first = False
+            yield "}}"

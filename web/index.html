@@ -60,7 +60,7 @@ const TRANSPORT = ['Flight', 'Rail / travel', 'Transfer'];
 const COMMON_ZONES = ['Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Europe/Berlin', 'Europe/Amsterdam', 'Europe/London', 'Europe/Paris', 'America/New_York', 'America/Detroit', 'America/Chicago', 'America/Los_Angeles', 'UTC'];
 const SCHEMA = {Trips: ['tripId', 'name', 'type', 'destination', 'startDate', 'endDate', 'notes', 'sample', 'privateDays', 'calendar'], Activities: ['activityId', 'tripId', 'category', 'title', 'startDate', 'startTime', 'startZone', 'endDate', 'endTime', 'endZone', 'from', 'to', 'address', 'provider', 'confirmation', 'status', 'notes', 'documentIds'], Documents: ['documentId', 'tripId', 'activityId', 'name', 'mime', 'size', 'category', 'confirmation', 'status', 'notes'], Expenses: ['expenseId', 'tripId', 'activityId', 'date', 'description', 'category', 'amount', 'currency', 'evidence', 'paid', 'documentId'], Settings: ['key', 'value']};
 const SETTING_DEFAULTS = {autoProcess: 'on', dateOrder: 'auto', aiReading: 'on', autoTrips: 'on', homeZone: 'Asia/Shanghai'};
-const FILE_LIMIT = 12 * 1048576, TOTAL_LIMIT = 40 * 1048576;
+const FILE_LIMIT = 12 * 1048576, TOTAL_LIMIT = 250 * 1048576, UPLOAD_BATCH = 36 * 1048576;
 const REVIEW_STATES = ['Review needed', 'Partly added', 'Reader error', 'Stopped'];
 const DONE_STATES = ['Auto-added', 'Already linked', 'Cost added', 'Reviewed', 'Ignored'];
 const hasOriginal = d => !!(d && (d.data || d.stored));
@@ -173,6 +173,13 @@ function markDirty() {
   dirty = true; nas.generation++; nasLabel('Unsaved · saving to NAS…', true); clearTimeout(nas.timer); rememberPending();
   if (nas.ready && nas.authenticated) nas.timer = setTimeout(() => nasFlush().catch(() => {}), 650);
 }
+/** One save sends at most UPLOAD_BATCH of new files (the NAS accepts 60 MB per request); the others go
+ *  without contents this time and follow in the next saves, which start straight away. */
+function uploadBatch(s) {
+  let used = 0, left = 0;
+  for (const d of s.documents) if (d.data) { if (used && used + d.data.length > UPLOAD_BATCH) { delete d.data; left++ } else used += d.data.length }
+  return left;
+}
 function markUploaded(saved) {
   // Originals the NAS confirmed are dropped from memory; they load on demand from now on.
   for (const s of saved.documents) if (s.data && s.hash) { const d = docById(s.documentId); if (d?.data === s.data) { delete d.data; d.stored = true } }
@@ -185,12 +192,13 @@ function saveProblem(e) {
 }
 async function saveOnce() {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const generation = nas.generation, mine = snapshot();
-    nasLabel('Saving to NAS…');
+    const generation = nas.generation, mine = snapshot(), left = uploadBatch(mine);
+    nasLabel(left ? `Uploading documents to the NAS · ${left} more after this` : 'Saving to NAS…');
     try {
       const r = await nasApi('/api/state', {method: 'PUT', body: JSON.stringify({state: mine, revision: nas.revision})});
       nas.revision = r.revision; nas.base = lite(mine); markUploaded(mine); nas.failures = 0;
-      if (nas.generation === generation) { dirty = false; pendingStore.clear(); nasLabel('Saved on NAS · revision ' + nas.revision) }
+      if (left) { nasLabel(`Uploading documents to the NAS · ${left} left`); rememberPending() }
+      else if (nas.generation === generation) { dirty = false; pendingStore.clear(); nasLabel('Saved on NAS · revision ' + nas.revision) }
       else { nasLabel('New changes waiting to save', true); rememberPending() }
       return;
     } catch (e) {
@@ -678,7 +686,7 @@ function deleteRecord(kind, id) {
 function inferMime(f) { const ext = f.name.toLowerCase().split('.').pop(), types = {jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', pdf: 'application/pdf', txt: 'text/plain', eml: 'message/rfc822', ics: 'text/calendar', csv: 'text/csv', html: 'text/html', htm: 'text/html', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword'}; return types[ext] || f.type || 'application/octet-stream' }
 function readData(f) { return new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(Error('Could not read ' + f.name)); r.readAsDataURL(f) }) }
 async function fileHash(f) { try { if (globalThis.crypto?.subtle) { const h = await crypto.subtle.digest('SHA-256', await f.arrayBuffer()); return Array.from(new Uint8Array(h)).map(x => x.toString(16).padStart(2, '0')).join('') } } catch {} return '' }
-function checkFileBudget(f, replacing = '') { if (f.size > FILE_LIMIT) throw Error(f.name + ' exceeds the 12 MB per-file limit.'); const total = state.documents.filter(d => d.documentId !== replacing && hasOriginal(d)).reduce((n, d) => n + Number(d.size || 0), 0); if (total + f.size > TOTAL_LIMIT) throw Error('Stored originals would exceed the 40 MB limit. Download a backup, then remove older files.') }
+function checkFileBudget(f, replacing = '') { if (f.size > FILE_LIMIT) throw Error(f.name + ' exceeds the 12 MB per-file limit.'); const total = state.documents.filter(d => d.documentId !== replacing && hasOriginal(d)).reduce((n, d) => n + Number(d.size || 0), 0); if (total + f.size > TOTAL_LIMIT) throw Error('Stored originals would exceed the 250 MB limit. Download a backup, then remove older files.') }
 function dataBytes(data) { const bin = atob(data.slice(data.indexOf(',') + 1)), bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return bytes }
 /** File contents: from memory for files not yet uploaded, otherwise fetched from the NAS on demand. */
 async function originalBytes(d) {
@@ -1282,7 +1290,7 @@ function sanitizeState(s, {preserve = false, lenient = false} = {}) {
     if (e.activityId && (!actIds.has(e.activityId) || actOf(e.activityId)?.tripId !== e.tripId)) { strict('A cost has an invalid itinerary link.'); e.activityId = '' }
     if (e.documentId && (!docIds.has(e.documentId) || (docOf(e.documentId).tripId && docOf(e.documentId).tripId !== e.tripId))) { strict('A cost refers to a missing or other-trip document.'); e.documentId = ''; if (e.evidence === 'Invoice') e.evidence = 'No invoice' }
   }
-  if (clean.documents.reduce((n, d) => n + (hasOriginal(d) ? d.size : 0), 0) > TOTAL_LIMIT) strict('Attachments exceed the 40 MB limit.');
+  if (clean.documents.reduce((n, d) => n + (hasOriginal(d) ? d.size : 0), 0) > TOTAL_LIMIT) strict('Attachments exceed the 250 MB limit.');
   for (const k of ['owner', 'lastSaved']) if (typeof s.settings?.[k] === 'string') clean.settings[k] = s.settings[k].slice(0, 500);
   for (const k of ['autoProcess', 'aiReading', 'autoTrips']) clean.settings[k] = s.settings?.[k] === 'off' ? 'off' : 'on';
   clean.settings.dateOrder = ['auto', 'dmy', 'mdy'].includes(s.settings?.dateOrder) ? s.settings.dateOrder : 'auto';
@@ -1303,7 +1311,7 @@ function backup() {
 }
 async function restoreFile(f) {
   try {
-    if (f.size > 60 * 1048576) throw Error('Backup exceeds the size limit.');
+    if (f.size > 400 * 1048576) throw Error('Backup exceeds the size limit.');
     const clean = sanitizeState(JSON.parse(await f.text()));
     confirmAction('Restore this backup?', `Replace the current workspace with ${clean.trips.length} trips, ${clean.activities.length} itinerary items, ${clean.documents.length} documents and ${clean.expenses.length} costs? The server keeps earlier revisions.`, () => replaceWorkspace(clean, 'Backup restored.'), '', 'Restore backup');
   } catch (e) { toast('Backup was not imported: ' + e.message) }
