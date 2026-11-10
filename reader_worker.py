@@ -164,6 +164,104 @@ def read_email(binary):
     return "\n".join([*headers, "", *(bodies or html_bodies)])[:MAX_TEXT]
 
 
+MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024
+SMALL_INLINE_IMAGE = 10 * 1024  # logos, signatures and tracking pixels
+IMAGE_MAGIC = ((b"\xff\xd8\xff", "image/jpeg", ".jpg"), (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
+               (b"GIF8", "image/gif", ".gif"), (b"RIFF", "image/webp", ".webp"))
+
+
+def _attachment_kind(mime, name, payload):
+    """(kind, mime, suffix) for a part we can read, else (None, reason, '')."""
+    suffix = Path(name).suffix.lower()
+    if payload[:5] == b"%PDF-" or mime == "application/pdf" or suffix == ".pdf":
+        if payload[:5] != b"%PDF-":
+            return None, "not a valid PDF", ""
+        if b"/Encrypt" in payload[:4096] or b"/Encrypt" in payload[-4096:]:
+            return None, "password-protected PDF", ""
+        return "pdf", "application/pdf", ".pdf"
+    for magic, media, ext in IMAGE_MAGIC:
+        if payload.startswith(magic) and (media != "image/webp" or payload[8:12] == b"WEBP"):
+            return "image", media, ext
+    if mime.startswith("image/") or suffix in (".heic", ".heif", ".tif", ".tiff", ".bmp"):
+        return None, "photo format not supported (use JPEG or PNG)", ""
+    if payload.startswith(b"PK\x03\x04") and (suffix == ".docx" or mime == DOCX_MIME):
+        return "docx", DOCX_MIME, ".docx"
+    if suffix == ".doc" or payload.startswith(b"\xd0\xcf\x11\xe0"):
+        return None, "old Word .doc (save as .docx or PDF)", ""
+    if mime == "text/calendar" or suffix == ".ics":
+        return None, "calendar file (not read yet)", ""
+    if suffix == ".pkpass" or mime == "application/vnd.apple.pkpass":
+        return None, "Apple Wallet pass (not read yet)", ""
+    if mime in ("text/plain", "text/html") or suffix in (".txt", ".htm", ".html"):
+        return "text", "text/plain", ".txt"
+    return None, "file type not supported", ""
+
+
+def _safe_name(value, fallback):
+    name = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f/\\*?\"<>|]+", " ", str(value or "")).replace(":", " -")).strip(" .")[:120]
+    return name or fallback
+
+
+def split_email(path, root):
+    """Body text, readable attachments (written to `root`) and a small copy of the email without them.
+    Forwarded emails attached as .eml are walked too, so their PDFs are found."""
+    binary = path.read_bytes()
+    message = BytesParser(policy=policy.default).parsebytes(binary)
+    attachments, skipped, count = [], [], 0
+    for part in message.walk():
+        count += 1
+        if count > 200:
+            raise Failure("Email contains too many MIME parts.", "part_limit")
+        if part.is_multipart():
+            continue
+        mime, disposition = part.get_content_type(), part.get_content_disposition()
+        try:
+            filename = part.get_filename() or ""
+        except Exception:
+            filename = ""
+        if mime in ("text/plain", "text/html") and disposition != "attachment" and not filename:
+            continue  # message body: read_email() covers it
+        payload = part.get_payload(decode=True) or b""
+        if not payload:
+            continue
+        kind, media, ext = _attachment_kind(mime, filename, payload)
+        if kind == "image" and len(payload) < SMALL_INLINE_IMAGE:
+            continue
+        name = _safe_name(filename, "attachment-%d%s" % (len(attachments) + 1, ext))
+        if kind is None:
+            skipped.append({"name": name, "reason": media})
+        elif len(payload) > MAX_ATTACHMENT_BYTES:
+            skipped.append({"name": name, "reason": "larger than 12 MB"})
+        elif len(attachments) >= MAX_ATTACHMENTS:
+            skipped.append({"name": name, "reason": "more than %d attachments" % MAX_ATTACHMENTS})
+        else:
+            if ext and not name.lower().endswith(ext) and kind != "text":
+                name += ext
+            target = Path(root) / ("part-%d%s" % (len(attachments), ext))
+            target.write_bytes(payload)
+            attachments.append({"file": target.name, "name": name, "mime": media, "kind": kind, "size": len(payload)})
+    text = read_email(binary)
+    # A small stand-in for the original: headers and body text only, so attachments are stored once.
+    from email.message import EmailMessage
+    copy = EmailMessage()
+    for key in ("Subject", "From", "To", "Cc", "Date", "Message-ID"):
+        try:
+            if message[key]:
+                copy[key] = str(message[key])
+        except Exception:
+            pass
+    body = text.split("\n\n", 1)[1] if "\n\n" in text else text
+    copy.set_content(body or "(no text)")
+    (Path(root) / "email.eml").write_bytes(copy.as_bytes())
+    try:
+        subject = str(message["Subject"] or "")
+    except Exception:
+        subject = ""
+    return {"text": text, "subject": _safe_name(subject, "Email")[:100], "email": "email.eml",
+            "attachments": attachments, "skipped": skipped}
+
+
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCX_XML = 20 * 1024 * 1024
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -337,6 +435,15 @@ def main():
     resource.setrlimit(resource.RLIMIT_CPU, (50, 50))
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     path, mime, name, root, *mode = sys.argv[1:]
+    if mode == ["--split-email"]:
+        try:
+            result = split_email(Path(path), root)
+        except Failure as exc:
+            result = {"error": exc.message, "code": exc.code, "status": exc.status}
+        except Exception:
+            result = {"error": "The email could not be split safely.", "code": "invalid_email", "status": 422}
+        print(json.dumps(result, ensure_ascii=True, allow_nan=False))
+        return
     if mode == ["--ai-image"]:
         try:
             result = prepare_ai_image(Path(path), root)
