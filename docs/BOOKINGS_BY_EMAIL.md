@@ -26,3 +26,21 @@ Forward one airline confirmation with its PDF to `travel@businessintels.com` fro
 - **"Refused · sender could not be verified":** the sender's mail server did not pass Cloudflare's checks (SPF/DKIM/DMARC). Forward from another address, or send the Activity log entry to Claude.
 - **Nothing in Recent emails:** check Cloudflare's Email Routing **Activity log**. If the email went to your inbox (fallback), the key in the Worker probably does not match: create a new key and update `INBOUND_SECRET`.
 - **A new key** in the app replaces the old one immediately; update the Worker secret straight after.
+
+# Work calendar invites (optional)
+
+Trips are sent to your work email as Outlook invites. The trip is an all-day event; for business + private trips, only the business days are included. Each flight is a separate event at its local time.
+- Business trips are sent automatically. Private trips are sent only when the trip's **Work calendar invite** setting is *Send*. *Don't send* stops any trip.
+- A change goes out as an update once the trip has not changed for 5 minutes. A removed trip or flight is cancelled in Outlook.
+- Trips that have already ended are never sent. Trip notes and flight notes are never included.
+
+The Worker that receives your emails also sends the invites. It checks Travel Manager once a minute, so your NAS never has to contact Cloudflare.
+
+## Setup (once)
+1. **Verify your work address:** Cloudflare → Email Routing → businessintels.com → **Destination addresses** → **Add destination address** → your work email. Click the link in the verification email.
+2. **Update the Worker code:** Workers & Pages → `travel-inbound` → **Edit code**. Replace everything with the current `tools/cloudflare_inbound_worker.js`, then click **Deploy**.
+3. **Add the email binding:** Worker → **Settings** → **Bindings** → **Add binding** → **Send email**. Variable name: `EMAIL`. Destination: your work address. Then **Deploy**.
+4. **Add the minute trigger:** Worker → **Settings** → **Trigger events** → **Add** → **Cron trigger** → every minute (`* * * * *`). Then **Deploy**.
+5. **In Travel Manager:** Documents → **Work calendar invites**. Enter your work email and the travel address (`travel@businessintels.com`), tick **Send invites**, then **Save**. The note should say Cloudflare checks every minute.
+
+The first invites arrive about 6 minutes later. **Recent invites** in the panel shows what was sent, and any error.

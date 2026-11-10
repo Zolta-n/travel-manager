@@ -19,7 +19,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --requirement requirements.txt
-COPY ai_reader.py travel_log.py inbound.py app.py store.py extractor.py reader_worker.py server.py initialize_data.py easy_data.py ./
+COPY ai_reader.py travel_log.py inbound.py calendar_invites.py app.py store.py extractor.py reader_worker.py server.py initialize_data.py easy_data.py ./
 COPY web/ ./web/
 # Host file modes must never matter: Synology ACL shares extract files as 0700 owner-only,
 # which Docker COPY preserves. Normalise ownership and modes so UID 10001 can read the code.

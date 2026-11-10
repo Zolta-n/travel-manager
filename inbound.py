@@ -33,6 +33,7 @@ MAX_SENDERS = 20
 FAIL_WINDOW, FAIL_LIMIT = 600, 5          # wrong keys per client before a pause
 KEEP_DAYS = 400                           # remembered Message-IDs (duplicates are ignored)
 STORAGE_MARGIN = 1024 * 1024
+CALENDAR_REPLY = re.compile(rb'text/calendar[^:]{0,300}?method="?reply', re.I | re.S)
 ADDRESS = re.compile(r"[a-z0-9._%+'-]{1,64}@[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+")
 
 
@@ -141,7 +142,7 @@ class Inbound:
 
     # ------------------------------------------------------------ receiving (Cloudflare Worker)
 
-    def _check_key(self, env):
+    def check_key(self, env):
         client = "inbound|" + self.app.client_id(env)
         client = hashlib.sha256(client.encode("utf-8")).hexdigest()
         now = time.time()
@@ -165,7 +166,7 @@ class Inbound:
                        (key or "event-" + secrets.token_hex(8), time.time(), status, detail, document_id))
 
     def receive(self, env):
-        self._check_key(env)
+        self.check_key(env)
         if self.store.meta_get("inbound_enabled") != "1":
             raise InboundError(403, "Bookings by email are switched off in Travel Manager.", "inbound_disabled")
         if env.get("CONTENT_TYPE", "").split(";", 1)[0].strip().lower() not in ("message/rfc822", "application/octet-stream"):
@@ -180,6 +181,10 @@ class Inbound:
         raw = env["wsgi.input"].read(length)
         if len(raw) != length:
             raise InboundError(400, "The email was cut off.", "incomplete")
+        if CALENDAR_REPLY.search(raw[:200000]):
+            # "Accepted / Declined" answers to the work-calendar invites come back here: nothing to read.
+            self._event("ignored", "calendar reply")
+            return {"accepted": True, "duplicate": False, "ignored": True}
         headers = BytesHeaderParser(policy=policy.default).parsebytes(raw)
         try:
             sender = _address(str(headers.get("From", "")))
