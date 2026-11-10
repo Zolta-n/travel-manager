@@ -20,6 +20,7 @@ from ai_reader import AIConfig, AIError, EMAIL_NOTE, JobBoard, build_content, bu
 import base64
 import travel_log
 from extractor import extract_document, is_image, is_pdf, prepare_ai_image, reader_health, ReaderError, ReaderGate, split_email
+from reader_worker import protected_pdf
 from inbound import Inbound, InboundError
 from calendar_invites import Calendar, CalendarError
 from store import Conflict, StateError, Store
@@ -660,7 +661,7 @@ class Application:
     def _attachment_blocks(self, item):
         """Claude blocks for one email attachment {name, mime, kind, data}."""
         name, kind, data = item["name"], item.get("kind") or "", item["data"]
-        if kind == "pdf":
+        if kind == "pdf" and not protected_pdf(data):
             return build_content(data, "application/pdf", name)
         temp = self.work_dir / ("attachment-" + secrets.token_hex(8) + Path(name).suffix.lower()[:8])
         temp.write_bytes(data)
@@ -669,7 +670,7 @@ class Application:
                 image = self._with_reader(lambda: prepare_ai_image(temp, item["mime"], name, self.work_dir))
                 return build_content(data, item["mime"], name, image=image)
             text = self._with_reader(lambda: extract_document(temp, item["mime"], name, self.work_dir))["text"]
-            return build_content(data, "text/plain", name, text=text)
+            return build_content(b"", "text/plain", name, text=text)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -721,7 +722,12 @@ class Application:
             return self.analyze_email(split["text"], attachments, name)
         binary = Path(path).read_bytes()
         source_text, method = "", "PDF read by Claude"
-        if is_pdf(path, mime, name):
+        if is_pdf(path, mime, name) and protected_pdf(binary):
+            # Copy-restricted PDF: its text is read on the NAS and sent as text.
+            local = self._with_reader(lambda: extract_document(path, mime, name, self.work_dir))
+            source_text = local["text"]
+            content, method = build_content(b"", "text/plain", name, text=source_text), "Protected PDF, text read by Claude"
+        elif is_pdf(path, mime, name):
             content = build_content(binary, mime, name)
         elif is_image(mime, name):
             image = self._with_reader(lambda: prepare_ai_image(path, mime, name, self.work_dir))

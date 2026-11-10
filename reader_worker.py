@@ -177,8 +177,6 @@ def _attachment_kind(mime, name, payload):
     if payload[:5] == b"%PDF-" or mime == "application/pdf" or suffix == ".pdf":
         if payload[:5] != b"%PDF-":
             return None, "not a valid PDF", ""
-        if b"/Encrypt" in payload[:4096] or b"/Encrypt" in payload[-4096:]:
-            return None, "password-protected PDF", ""
         return "pdf", "application/pdf", ".pdf"
     for magic, media, ext in IMAGE_MAGIC:
         if payload.startswith(magic) and (media != "image/webp" or payload[8:12] == b"WEBP"):
@@ -198,6 +196,12 @@ def _attachment_kind(mime, name, payload):
     return None, "file type not supported", ""
 
 
+def protected_pdf(binary):
+    """True for a PDF with an /Encrypt dictionary: usually only copying/editing is restricted (it opens
+    without a password); such files are read as text locally rather than sent to Claude as a PDF."""
+    return binary[:5] == b"%PDF-" and b"/Encrypt" in binary
+
+
 def _safe_name(value, fallback):
     name = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f/\\*?\"<>|]+", " ", str(value or "")).replace(":", " -")).strip(" .")[:120]
     return name or fallback
@@ -209,6 +213,13 @@ def split_email(path, root):
     binary = path.read_bytes()
     message = BytesParser(policy=policy.default).parsebytes(binary)
     attachments, skipped, count = [], [], 0
+
+    def keep(name, payload):
+        if len(payload) > MAX_ATTACHMENT_BYTES:
+            return {}
+        target = Path(root) / ("kept-%d%s" % (len(skipped), Path(name).suffix.lower()[:8]))
+        target.write_bytes(payload)
+        return {"file": target.name, "size": len(payload)}
     for part in message.walk():
         count += 1
         if count > 200:
@@ -229,12 +240,19 @@ def split_email(path, root):
         if kind == "image" and len(payload) < SMALL_INLINE_IMAGE:
             continue
         name = _safe_name(filename, "attachment-%d%s" % (len(attachments) + 1, ext))
+        if kind == "pdf" and protected_pdf(payload) and len(payload) <= MAX_ATTACHMENT_BYTES:
+            probe = Path(root) / ("probe-%d.pdf" % count)
+            probe.write_bytes(payload)
+            code, _, error = run(["pdfinfo", str(probe)], Path(root), time.monotonic() + 20)
+            probe.unlink(missing_ok=True)
+            if code:
+                kind, media = None, "needs a password to open" if b"assword" in error else "PDF could not be opened"
         if kind is None:
-            skipped.append({"name": name, "reason": media})
+            skipped.append({"name": name, "reason": media, **keep(name, payload)})
         elif len(payload) > MAX_ATTACHMENT_BYTES:
             skipped.append({"name": name, "reason": "larger than 12 MB"})
         elif len(attachments) >= MAX_ATTACHMENTS:
-            skipped.append({"name": name, "reason": "more than %d attachments" % MAX_ATTACHMENTS})
+            skipped.append({"name": name, "reason": "more than %d attachments" % MAX_ATTACHMENTS, **keep(name, payload)})
         else:
             if ext and not name.lower().endswith(ext) and kind != "text":
                 name += ext
@@ -252,7 +270,7 @@ def split_email(path, root):
         except Exception:
             pass
     body = text.split("\n\n", 1)[1] if "\n\n" in text else text
-    copy.set_content(body or "(no text)")
+    copy.set_content(body or "(no text)", cte="8bit")
     (Path(root) / "email.eml").write_bytes(copy.as_bytes())
     try:
         subject = str(message["Subject"] or "")
@@ -354,8 +372,8 @@ def extract(path, mime, name, cwd):
     if first.startswith(b"%PDF-") or mime == "application/pdf" or suffix == ".pdf":
         code, output, error = run(["pdfinfo", "-f", "1", "-l", str(MAX_PAGES), "-box", str(path)], cwd, deadline)
         info = output.decode("utf-8", errors="replace")
-        if re.search(r"^Encrypted:\s+yes", info, re.I | re.M) or re.search(r"password|encrypt", error.decode("utf-8", errors="replace"), re.I):
-            raise Failure("This PDF is encrypted. Remove its protection in a trusted local PDF tool before reading it.", "encrypted_pdf")
+        if code and re.search(r"password|encrypt", error.decode("utf-8", errors="replace"), re.I):
+            raise Failure("This PDF needs a password to open. Save an unprotected copy, then upload that.", "encrypted_pdf")
         if code:
             raise Failure("This PDF is invalid or cannot be read.", "invalid_pdf")
         match = re.search(r"^Pages:\s+(\d+)", info, re.M)

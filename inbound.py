@@ -284,6 +284,17 @@ class Inbound:
                 budget -= len(item["data"])
             child["category"] = "Invoice" if re.search(r"invoice|receipt|rechnung|beleg", item["name"], re.I) else "Other"
             children.append(child)
+        for index, item in enumerate(s for s in split["skipped"] if s.get("data")):
+            mime = "application/pdf" if item["data"][:5] == b"%PDF-" else "application/octet-stream"
+            child = {**self._base(email_id + "-s%d" % index, item["name"], mime, item["data"], received),
+                     "sourceEmail": email_id, "status": "Not read · " + item["reason"],
+                     "auto": {"state": "Ignored", "reason": "Not read automatically: " + item["reason"] + "."}}
+            if len(item["data"]) > budget:
+                child.pop("data")
+                child.update(size=len(item["data"]), notes="Not stored: the NAS storage limit for documents is reached.")
+            else:
+                budget -= len(item["data"])
+            children.append(child)
         if not_stored:
             email_doc["emailSkipped"] = (email_doc["emailSkipped"] + "; " if email_doc["emailSkipped"] else "") + \
                 "; ".join(n + ": not stored, storage limit reached" for n in not_stored)

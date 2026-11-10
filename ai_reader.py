@@ -178,6 +178,12 @@ def build_content(binary, mime, name, text=None, image=None):
     """Return Claude content blocks for a document. `image` is (bytes, media_type) when pre-scaled."""
     mime = (mime or "").lower()
     suffix = os.path.splitext(name or "")[1].lower()
+    if text is not None and image is None and not binary:
+        # Text already read on the NAS (e.g. a copy-restricted PDF): send the text, whatever the file name.
+        if not text.strip():
+            raise AIError("The document contains no readable text.", "no_text", 422)
+        return [{"type": "text", "text": "Document file: " + (name or "document") +
+                 "\n----- DOCUMENT TEXT START -----\n" + text[:MAX_TEXT_CHARS] + "\n----- DOCUMENT TEXT END -----"}]
     if binary[:5] == b"%PDF-" or mime == "application/pdf" or suffix == ".pdf":
         if len(binary) > MAX_PDF_BYTES:
             raise AIError("This PDF exceeds the 12 MB AI reading limit.", "too_large", 413)
