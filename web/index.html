@@ -944,7 +944,7 @@ function applyReading(d, r, note = '') {
   for (const [ci, c] of (r.costs || []).entries()) {
     const seg = r.segments[c.segmentIndex]?.activity, date = c.date || seg?.startDate || r.documentDate || '';
     if (!match.automatic || !d.tripId || !['Invoice', 'Receipt'].includes(c.kind) || !validDate(date)) { skippedCosts.push(fmtMoney(c.amount, c.currency) + ' (' + c.description + ')'); continue }
-    const dup = state.expenses.find(e => e.expenseId === `${d.documentId}-${stamp}-c${ci}` || (e.tripId === d.tripId && e.currency === c.currency && Math.abs(e.amount - c.amount) < 0.005 && e.documentId === d.documentId));
+    const dup = state.expenses.find(e => e.expenseId === `${d.documentId}-${stamp}-c${ci}` || (e.tripId === d.tripId && e.currency === c.currency && Math.abs(e.amount - c.amount) < 0.005 && (e.documentId === d.documentId || e.date === date)));
     if (dup) { expenseIds.push(dup.expenseId); continue }
     const e = {expenseId: `${d.documentId}-${stamp}-c${ci}`, tripId: d.tripId, activityId: created[c.segmentIndex] || '', date, description: [seg?.provider || first?.provider, c.description].filter(Boolean).join(' · ') || d.name, category: seg?.category || first?.category || 'Other', amount: c.amount, currency: c.currency, evidence: c.kind, paid: c.kind === 'Receipt' ? 'Yes' : 'No', documentId: d.documentId};
     state.expenses.push(e); expenseIds.push(e.expenseId);

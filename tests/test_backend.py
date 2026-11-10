@@ -368,14 +368,23 @@ class ExtractionTests(WorkspaceCase):
             self.extract(make_pdf(pages=21), "application/pdf", "long.pdf")
         self.assertEqual(failure.exception.code, "page_limit")
 
-    def test_encrypted_pdf_stops_before_any_text_or_ocr(self):
+    def test_password_pdf_stops_before_any_text_or_ocr(self):
         original = self.work / "original.pdf"
         original.write_bytes(make_pdf())
-        with patch.object(reader_worker, "run", return_value=(0, b"Pages: 1\nEncrypted: yes (print:yes copy:yes)\n", b"")) as runner:
+        with patch.object(reader_worker, "run", return_value=(1, b"", b"Command Line Error: Incorrect password\n")) as runner:
             with self.assertRaises(reader_worker.Failure) as failure:
                 reader_worker.extract(original, "application/pdf", "x.pdf", self.work)
         self.assertEqual(failure.exception.code, "encrypted_pdf")
         self.assertEqual(runner.call_count, 1)
+
+    @unittest.skipUnless(shutil.which("pdfinfo") and shutil.which("pdftotext"), "Poppler tools not installed")
+    def test_copy_restricted_pdf_is_read(self):
+        # Opens without a password; only copying/editing is restricted (common for hotel invoices).
+        result = self.extract((ROOT / "tests" / "fixtures" / "copy-restricted.pdf").read_bytes(), "application/pdf", "invoice.pdf")
+        self.assertIn("INVOICE Hotel Example", result["text"])
+        with self.assertRaises(ReaderError) as failure:
+            self.extract((ROOT / "tests" / "fixtures" / "password.pdf").read_bytes(), "application/pdf", "locked.pdf")
+        self.assertEqual(failure.exception.code, "encrypted_pdf")
 
     @unittest.skipUnless(shutil.which("tesseract") and importlib.util.find_spec("PIL"), "Tesseract or Pillow not installed")
     def test_actual_image_ocr_and_pixel_limit(self):

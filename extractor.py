@@ -105,8 +105,10 @@ def split_email(path, work_root):
                 raise ReaderError("The email could not be split safely.", "invalid_email")
             return target.read_bytes()
         attachments = result.get("attachments") if isinstance(result.get("attachments"), list) else []
+        skipped = [{"name": s.get("name", ""), "reason": s.get("reason", ""), **({"data": read(s["file"])} if s.get("file") else {})}
+                   for s in (result.get("skipped") or []) if isinstance(s, dict)]
         return {"text": str(result.get("text") or ""), "subject": str(result.get("subject") or "Email"),
-                "email": read(result.get("email")), "skipped": result.get("skipped") or [],
+                "email": read(result.get("email")), "skipped": skipped,
                 "attachments": [{**{k: a.get(k) for k in ("name", "mime", "kind", "size")}, "data": read(a.get("file"))}
                                 for a in attachments if isinstance(a, dict)]}
     return _run_worker(path, "message/rfc822", "email.eml", work_root, "--split-email", collect=collect)

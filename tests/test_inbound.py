@@ -220,6 +220,42 @@ class InboundTests(unittest.TestCase):
         self.assertIn("storage limit", ticket["notes"])
         self.assertIn("storage limit", next(d for d in docs if d.get("emailAttachments") is not None)["emailSkipped"])
 
+    def test_copy_restricted_pdf_is_read_and_password_pdf_is_kept(self):
+        # Hotel invoices are often restricted against copying; they open without a password.
+        fixtures = ROOT / "tests" / "fixtures"
+        m = EmailMessage()
+        m["Authentication-Results"] = CF_PASS
+        m["Subject"], m["From"], m["Message-ID"] = "Fw: Invoice for your stay", "Owner <owner@example.com>", "<pdf@example.com>"
+        m.set_content("Dear guest, attached the invoice for your stays and a restaurant receipt. Vielen Dank für Ihren Besuch.")
+        m.add_attachment((fixtures / "copy-restricted.pdf").read_bytes(), maintype="application", subtype="pdf", filename="Hotel invoice.pdf")
+        m.add_attachment(PDF, maintype="application", subtype="pdf", filename="Restaurant receipt.pdf")
+        m.add_attachment((fixtures / "password.pdf").read_bytes(), maintype="application", subtype="pdf", filename="locked.pdf")
+        key, _, _ = self.enable()
+        self.call("POST", "/api/inbound", raw=bytes(m), key=key)
+        self.app.inbound.process_pending()
+        sent = self.fake.requests[0]["messages"][0]["content"]
+        # The protected invoice reaches Claude as text read on the NAS, the plain receipt as a PDF.
+        self.assertTrue(any(b["type"] == "text" and "INVOICE Hotel Example" in b["text"] for b in sent))
+        self.assertEqual([b["type"] for b in sent].count("document"), 1)
+        docs = self.documents()
+        mail = next(d for d in docs if d.get("source") == "email" and not d.get("sourceEmail"))
+        self.assertEqual(mail["emailAttachments"], 2)
+        self.assertIn("locked.pdf: needs a password to open", mail["emailSkipped"])
+        locked = next(d for d in docs if d.get("name") == "locked.pdf")
+        self.assertEqual((locked["auto"]["state"], locked["sourceEmail"]), ("Ignored", mail["documentId"]))
+        self.assertTrue(locked.get("stored"))  # kept on the NAS, not lost
+        # The stored copy of the email is readable text, not quoted-printable.
+        data, _, _ = self.app.store.original(mail["documentId"])
+        self.assertIn("Vielen Dank für Ihren Besuch", data.decode("utf-8"))
+
+    def test_uploaded_copy_restricted_pdf_is_read_as_text(self):
+        path = ROOT / "tests" / "fixtures" / "copy-restricted.pdf"
+        result = self.app.analyze(path, "application/pdf", "Hotel invoice.pdf")
+        sent = self.fake.requests[0]["messages"][0]["content"]
+        self.assertEqual(sent[0]["type"], "text")
+        self.assertIn("INVOICE Hotel Example", sent[0]["text"])
+        self.assertIn("Protected PDF", result["method"])
+
     def test_email_without_attachments_and_without_ai(self):
         app = Application(Config(**{**self.config.__dict__, "ai": None}))
         self.app = app
