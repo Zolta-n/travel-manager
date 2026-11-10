@@ -45,3 +45,8 @@ Zoltan. Non-developer for this project: prefers DSM GUI steps (Task Scheduler, F
 - Causes found: sessions deleted on every restart and only 12 h long; one shared sign-in limit for all devices (all traffic arrives from the tunnel); a save conflict stopped a device from saving; unsaved edits lived only in the tab; "Reading…" was saved to the server and AI results were lost when the tab closed.
 - Fixes: see `VERIFICATION.md` (v4.1) and `CLAUDE.md`. Code now lives in GitHub `Zolta-n/travel-manager`; deployment via GitHub Actions → ghcr.io → Watchtower (`UPDATE_WORKFLOW.md`).
 - Cloudflare zone `businessintels.com`: ECH turned off via API (the owner's office network broke ECH connections to all subdomains). HTTP/3 was turned off during diagnosis.
+
+
+## Next upgrade (planned)
+- **Bookings by email:** forward confirmations to `travel@businessintels.com`; Cloudflare Email Routing + Email Worker push the raw email to `POST /api/inbound`; the app reads the body and all attachments. Full spec: `docs/NEXT_UPGRADE_inbound_email.md`.
+- **Optional calendar invites:** send a trip as an Outlook invite to the work email, through the same Worker (Part 3 of the spec).
