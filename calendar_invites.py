@@ -92,14 +92,12 @@ def desired_events(state, today):
             flights.append((a, begin, finish))
         flights.sort(key=lambda item: item[1])
         mixed = trip.get("type") == "Mixed"
-        listing = "\n".join("%s  %s %s → %s %s" % (a.get("title", "Flight"), a.get("startDate", ""), a.get("startTime", ""),
-                                                   a.get("endDate", ""), a.get("endTime", "")) for a, _, _ in flights)
         for index, run in enumerate(runs):
             title = str(trip.get("name") or "Trip") + (" (business days)" if mixed and private & {d.isoformat() for d in days} else "")
             description = "\n".join(filter(None, [
                 str(trip.get("destination") or ""),
                 "%s – %s" % (run[0].strftime("%d %b %Y"), run[-1].strftime("%d %b %Y")),
-                ("Flights:\n" + listing) if listing and index == 0 else "",
+                "Each flight is a separate event." if flights and index == 0 else "",
                 "From Travel Manager. Changes to the trip update this event."]))
             events["trip-%s-%d@travel-manager" % (trip_id, index)] = {
                 "kind": "trip", "tripId": trip_id, "summary": title, "location": str(trip.get("destination") or ""),
@@ -109,8 +107,7 @@ def desired_events(state, today):
                 "%s → %s" % (a.get("from") or "", a.get("to") or "") if a.get("from") or a.get("to") else "",
                 "Departs %s %s (%s)" % (a.get("startDate"), a.get("startTime"), a.get("startZone")),
                 "Arrives %s %s (%s)" % (a.get("endDate"), a.get("endTime"), a.get("endZone")) if a.get("endTime") else "",
-                " · ".join(filter(None, [str(a.get("provider") or ""), ("Booking " + str(a["confirmation"])) if a.get("confirmation") else ""])),
-                "Trip: " + str(trip.get("name") or "")]
+                " · ".join(filter(None, [str(a.get("provider") or ""), ("Booking " + str(a["confirmation"])) if a.get("confirmation") else ""]))]
             events["flight-%s@travel-manager" % a.get("activityId")] = {
                 "kind": "flight", "tripId": trip_id, "summary": "✈ " + str(a.get("title") or "Flight"),
                 "location": str(a.get("from") or ""), "description": "\n".join(filter(None, details)), "allDay": False,
@@ -118,8 +115,16 @@ def desired_events(state, today):
     return events
 
 
+HASH_VERSION = "2"
+
+
 def event_hash(event):
-    return hashlib.sha256(json.dumps(event, sort_keys=True, ensure_ascii=True).encode("ascii")).hexdigest()
+    """Changes that are worth an update in Outlook: title, place, dates/times, booking reference.
+    Wording changes in the description alone do not send an update."""
+    key = {k: event.get(k) for k in ("summary", "location", "allDay", "start", "end")}
+    reference = re.search(r"Booking (\S+)", event.get("description", "")) if event.get("kind") == "flight" else None
+    key["reference"] = reference.group(1) if reference else ""
+    return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=True).encode("ascii")).hexdigest()
 
 
 # ---------------------------------------------------------------- iCalendar and the email
@@ -183,6 +188,10 @@ class Calendar:
             db.execute("CREATE TABLE IF NOT EXISTS invites (uid TEXT PRIMARY KEY, trip_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
                        "sent_hash TEXT NOT NULL, sent_event TEXT NOT NULL, sent_at REAL NOT NULL, status TEXT NOT NULL, "
                        "pending_hash TEXT NOT NULL, pending_since REAL NOT NULL, error TEXT NOT NULL, pending_event TEXT NOT NULL DEFAULT '')")
+            if (db.execute("SELECT value FROM meta WHERE key='calendar_hash_version'").fetchone() or [""])[0] != HASH_VERSION:
+                for row in db.execute("SELECT uid, sent_event FROM invites WHERE status='sent' AND sent_event<>''").fetchall():
+                    db.execute("UPDATE invites SET sent_hash=? WHERE uid=?", (event_hash(json.loads(row["sent_event"])), row["uid"]))
+                db.execute("INSERT INTO meta VALUES ('calendar_hash_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (HASH_VERSION,))
 
     # settings ------------------------------------------------------
     def settings(self):
@@ -211,6 +220,22 @@ class Calendar:
             raise CalendarError(400, "Enter your work address and the travel address first.", "invalid_settings")
         self.store.meta_set({"calendar_enabled": "1" if payload.get("enabled") else "0", "calendar_to": to, "calendar_from": sender})
         return self.settings()
+
+    def resend(self, trip_id, now=None, today=None):
+        """Send a trip's invites again (with a higher SEQUENCE) on Cloudflare's next check, about a minute."""
+        if self.store.meta_get("calendar_enabled") != "1":
+            raise CalendarError(400, "Work calendar invites are switched off (Documents → Work calendar invites).", "calendar_disabled")
+        events = {uid: e for uid, e in desired_events(self.store.metadata(), today or date.today()).items() if e["tripId"] == trip_id}
+        if not events:
+            raise CalendarError(400, "This trip is not sent to your work calendar: it has ended, is private, or is set to Don’t send.", "not_sent")
+        with self.store.connect() as db:
+            for uid, event in events.items():
+                digest = event_hash(event)
+                if db.execute("SELECT 1 FROM invites WHERE uid=?", (uid,)).fetchone():
+                    db.execute("UPDATE invites SET sent_hash='resend', pending_hash=?, pending_since=0, error='' WHERE uid=?", (digest, uid))
+                else:
+                    db.execute("INSERT INTO invites VALUES (?, ?, -1, '', '', 0, 'new', ?, 0, '', '')", (uid, trip_id, digest))
+        return {"queued": len(events)}
 
     # outbox --------------------------------------------------------
     def outbox(self, now=None, today=None):

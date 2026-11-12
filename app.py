@@ -383,6 +383,7 @@ class Application:
             ("POST", "/api/outbox"): self.ack_outbox,
             ("GET", "/api/calendar/settings"): self.calendar_settings,
             ("POST", "/api/calendar/settings"): self.save_calendar_settings,
+            ("POST", "/api/calendar/resend"): self.resend_invites,
             ("GET", "/manifest.json"): self.static, ("GET", "/apple-touch-icon.png"): self.static,
             ("GET", "/icon-192.png"): self.static, ("GET", "/icon-512.png"): self.static,
         }
@@ -657,6 +658,15 @@ class Application:
     def save_calendar_settings(self, env):
         self.require_auth(env, csrf=True)
         return self.ok(self.calendar.save_settings(self.read_json(env, 4096)))
+
+    def resend_invites(self, env):
+        self.require_auth(env, csrf=True)
+        payload = self.read_json(env, 4096)
+        trip_id = payload.get("tripId")
+        if set(payload) != {"tripId"} or not isinstance(trip_id, str) or not 1 <= len(trip_id) <= 256:
+            raise APIError(400, "Supply a tripId string.")
+        env["travel.note"] = "invite resend requested"
+        return self.ok(self.calendar.resend(trip_id))
 
     def _attachment_blocks(self, item):
         """Claude blocks for one email attachment {name, mime, kind, data}."""
