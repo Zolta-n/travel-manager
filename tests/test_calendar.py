@@ -145,19 +145,66 @@ class OutboxTests(unittest.TestCase):
         # The flight moves: one update with a higher SEQUENCE, after it settles.
         self.change(lambda s: s["activities"][0].update(startTime="01:10"))
         self.assertEqual(self.poll(3000), [])
-        updates = self.send_all(3000 + SETTLE_SECONDS)
-        # The flight and the trip event (it lists the flight times) are both updated, with SEQUENCE 1.
-        self.assertEqual(sorted(m["id"].split("|")[:2][0] for m in updates), ["flight-f1@travel-manager", "trip-b-0@travel-manager"])
-        self.assertTrue(all("SEQUENCE:1" in calendar_text(m["raw"]) and "Updated: " in m["raw"] for m in updates))
+        (update,) = self.send_all(3000 + SETTLE_SECONDS)
+        # Only the flight's own event is updated, with SEQUENCE 1.
+        self.assertTrue(update["id"].startswith("flight-f1@travel-manager|1|"))
+        self.assertIn("SEQUENCE:1", calendar_text(update["raw"]))
+        self.assertIn("Updated: ", update["raw"])
         # The flight is deleted: the invite is cancelled.
         self.change(lambda s: s["activities"].clear())
         self.poll(5000)
-        cancel = next(m for m in self.send_all(5000 + SETTLE_SECONDS) if m["id"].startswith("flight-"))
+        (cancel,) = self.send_all(5000 + SETTLE_SECONDS)
         self.assertIn("METHOD:CANCEL", calendar_text(cancel["raw"]))
         self.assertIn("|2|CANCEL", cancel["id"])
         self.assertEqual(self.poll(9000), [])
         recent = self.cal.settings()["recent"]
         self.assertIn("cancelled", [r["status"] for r in recent])
+
+    def test_trip_rename_and_new_dates_update_only_the_trip_event(self):
+        self.poll(0)
+        self.send_all(SETTLE_SECONDS)
+        self.change(lambda s: s["trips"][0].update(name="Munich fair"))
+        self.poll(1000)
+        (renamed,) = self.send_all(1000 + SETTLE_SECONDS)
+        text = calendar_text(renamed["raw"])
+        self.assertTrue(renamed["id"].startswith("trip-b-0@travel-manager|1|"))
+        self.assertIn("SUMMARY:Munich fair", text)
+        self.change(lambda s: s["trips"][0].update(startDate="2026-12-13", endDate="2026-12-20"))
+        self.poll(2000)
+        (moved,) = self.send_all(2000 + SETTLE_SECONDS)
+        text = calendar_text(moved["raw"])
+        self.assertIn("SEQUENCE:2", text)
+        self.assertIn("DTSTART;VALUE=DATE:20261213", text)
+        self.assertIn("DTEND;VALUE=DATE:20261221", text)
+        self.assertEqual(self.poll(9000), [])
+
+    def test_manual_resend_goes_out_at_once(self):
+        self.poll(0)
+        self.send_all(SETTLE_SECONDS)
+        self.assertEqual(self.poll(1000), [])
+        self.assertEqual(self.cal.resend("b", today=TODAY), {"queued": 2})
+        due = self.send_all(1001)  # no waiting for the 5 minutes
+        self.assertEqual(len(due), 2)
+        self.assertTrue(all("SEQUENCE:1" in calendar_text(m["raw"]) for m in due))
+        self.assertEqual(self.poll(9000), [])
+        with self.assertRaises(calendar_invites.CalendarError):
+            self.cal.resend("nope", today=TODAY)
+        self.change(lambda s: s["trips"][0].update(calendar="off"))
+        with self.assertRaises(calendar_invites.CalendarError):
+            self.cal.resend("b", today=TODAY)
+
+    def test_resend_endpoint_needs_sign_in(self):
+        self.assertIn(self.call("POST", "/api/calendar/resend", {"tripId": "b"})[0], (401, 403))  # refused without a signed-in browser
+
+    def test_new_change_rule_does_not_resend_existing_invites(self):
+        self.poll(0)
+        self.send_all(SETTLE_SECONDS)
+        with self.app.store.connect() as db:  # as stored by the earlier version
+            db.execute("UPDATE invites SET sent_hash='old-version-hash'")
+            db.execute("DELETE FROM meta WHERE key='calendar_hash_version'")
+        calendar_invites.Calendar(self.app.store)  # what a restart after the update does
+        self.assertEqual(self.poll(1000), [])
+        self.assertEqual(self.poll(1000 + SETTLE_SECONDS), [])
 
     def test_failed_send_is_retried_after_settling(self):
         self.poll(1000)
