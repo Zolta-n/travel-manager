@@ -21,3 +21,7 @@ web/**
 !web/apple-touch-icon.png
 !web/icon-192.png
 !web/icon-512.png
+!web/scenes/
+!web/scenes/city.jpg
+!web/scenes/garden.jpg
+!web/scenes/sky.jpg
