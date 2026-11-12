@@ -224,7 +224,7 @@ class Calendar:
     def resend(self, trip_id, now=None, today=None):
         """Send a trip's invites again (with a higher SEQUENCE) on Cloudflare's next check, about a minute."""
         if self.store.meta_get("calendar_enabled") != "1":
-            raise CalendarError(400, "Work calendar invites are switched off (Documents → Work calendar invites).", "calendar_disabled")
+            raise CalendarError(400, "Work calendar invites are switched off. Turn them on under Settings.", "calendar_disabled")
         events = {uid: e for uid, e in desired_events(self.store.metadata(), today or date.today()).items() if e["tripId"] == trip_id}
         if not events:
             raise CalendarError(400, "This trip is not sent to your work calendar: it has ended, is private, or is set to Don’t send.", "not_sent")

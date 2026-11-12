@@ -385,6 +385,7 @@ class Application:
             ("POST", "/api/calendar/settings"): self.save_calendar_settings,
             ("POST", "/api/calendar/resend"): self.resend_invites,
             ("GET", "/manifest.json"): self.static, ("GET", "/apple-touch-icon.png"): self.static,
+            ("GET", "/scenes/city.jpg"): self.static, ("GET", "/scenes/garden.jpg"): self.static, ("GET", "/scenes/sky.jpg"): self.static,
             ("GET", "/icon-192.png"): self.static, ("GET", "/icon-512.png"): self.static,
         }
 
@@ -419,7 +420,8 @@ class Application:
         return self.ok(body, [("Content-Type", "text/html; charset=utf-8")])
 
     STATIC = {"/manifest.json": "application/manifest+json", "/apple-touch-icon.png": "image/png",
-              "/icon-192.png": "image/png", "/icon-512.png": "image/png"}
+              "/icon-192.png": "image/png", "/icon-512.png": "image/png",
+              "/scenes/city.jpg": "image/jpeg", "/scenes/garden.jpg": "image/jpeg", "/scenes/sky.jpg": "image/jpeg"}
 
     def static(self, env):
         """Home-screen icon and web app manifest: public, no private data."""
